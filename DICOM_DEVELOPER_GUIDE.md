@@ -619,25 +619,67 @@ npm install dicom-parser
 #### dcm4che
 ```java
 // Comprehensive Java DICOM toolkit
-maven: org.dcm4che:dcm4che-core
+// Maven dependency:
+// <dependency>
+//     <groupId>org.dcm4che</groupId>
+//     <artifactId>dcm4che-core</artifactId>
+//     <version>5.31.1</version>
+// </dependency>
+//
+// Additional modules:
+//   dcm4che-net      - DICOM networking (associations, DIMSE services)
+//   dcm4che-imageio  - Image I/O and codec support (JPEG, JPEG 2000, etc.)
+//   dcm4che-tool     - Command-line tools (storescu, findscu, etc.)
+//   dcm4che-json     - JSON representation of DICOM data
+//   dcm4che-hl7      - HL7 message support
+//   dcm4che-audit    - Audit logging (ATNA)
+
+// Gradle dependency:
+// implementation 'org.dcm4che:dcm4che-core:5.31.1'
+// implementation 'org.dcm4che:dcm4che-net:5.31.1'
+// implementation 'org.dcm4che:dcm4che-imageio:5.31.1'
 
 // Features:
-- Complete DICOM implementation
-- Network services
-- Image processing
-- HL7 integration
+// - Complete DICOM standard implementation
+// - Full DIMSE service support (C-ECHO, C-STORE, C-FIND, C-MOVE, C-GET)
+// - Transfer syntax negotiation and transcoding
+// - Image codec support (JPEG, JPEG 2000, JPEG-LS, RLE)
+// - HL7 v2 integration
+// - WADO / DICOMweb support
+// - LDAP-based configuration
+// - ATNA audit logging
+// - Used as the foundation of the dcm4chee PACS server
 ```
 
 #### PixelMed
 ```java
-// Java DICOM toolkit
-http://www.pixelmed.com/
+// Java DICOM toolkit focused on education and research
+// http://www.pixelmed.com/
+// JAR available from: http://www.pixelmed.com/pixelmedjavadicom.html
 
 // Features:
-- DICOM file I/O
-- Network protocols
-- Validation tools
-- Education-focused
+// - DICOM file reading and writing
+// - Network protocols (C-ECHO, C-STORE, C-FIND, C-MOVE)
+// - DICOM validation and conformance tools
+// - Structured Report creation and parsing
+// - Anonymization utilities
+// - Image display and manipulation
+// - Education-focused with extensive Javadoc
+// - No external dependencies required
+```
+
+#### Weasis
+```java
+// Open-source DICOM viewer and toolkit
+// https://weasis.org/
+// Maven: org.weasis:weasis-dicom-tools
+
+// Features:
+// - Medical image viewing (2D, MPR, 3D)
+// - DICOM network operations
+// - Image processing and measurements
+// - Plugin architecture for extensibility
+// - Cross-platform (Windows, macOS, Linux)
 ```
 
 ### C++ Libraries
@@ -1058,6 +1100,608 @@ class Program
 }
 ```
 
+### Java: Reading DICOM Files with dcm4che
+
+```java
+import org.dcm4che3.data.Attributes;
+import org.dcm4che3.data.Tag;
+import org.dcm4che3.data.VR;
+import org.dcm4che3.io.DicomInputStream;
+
+import java.io.File;
+import java.io.IOException;
+
+public class ReadDicom {
+    public static void main(String[] args) {
+        if (args.length < 1) {
+            System.err.println("Usage: ReadDicom <dicom-file>");
+            return;
+        }
+
+        File dicomFile = new File(args[0]);
+
+        try (DicomInputStream dis = new DicomInputStream(dicomFile)) {
+            // Read all attributes including pixel data
+            Attributes attrs = dis.readDataset();
+            Attributes fmi = dis.readFileMetaInformation();
+
+            // Access common attributes
+            String patientName = attrs.getString(Tag.PatientName);
+            String studyDate = attrs.getString(Tag.StudyDate);
+            String modality = attrs.getString(Tag.Modality);
+            int rows = attrs.getInt(Tag.Rows, 0);
+            int columns = attrs.getInt(Tag.Columns, 0);
+
+            // Print information
+            System.out.println("Patient Name: " + patientName);
+            System.out.println("Study Date: " + studyDate);
+            System.out.println("Modality: " + modality);
+            System.out.println("Image Size: " + rows + " x " + columns);
+
+            // Access transfer syntax from file meta information
+            if (fmi != null) {
+                String transferSyntax = fmi.getString(Tag.TransferSyntaxUID);
+                System.out.println("Transfer Syntax: " + transferSyntax);
+            }
+
+            // Access pixel data attributes
+            int bitsAllocated = attrs.getInt(Tag.BitsAllocated, 0);
+            int bitsStored = attrs.getInt(Tag.BitsStored, 0);
+            String photometric = attrs.getString(Tag.PhotometricInterpretation);
+            System.out.println("Bits Allocated: " + bitsAllocated);
+            System.out.println("Bits Stored: " + bitsStored);
+            System.out.println("Photometric Interpretation: " + photometric);
+
+            // Access all tags in the dataset
+            System.out.println("\n--- All Tags ---");
+            attrs.accept((attrs1, tag, vr, value) -> {
+                System.out.printf("(%04X,%04X) %s: %s%n",
+                    tag >>> 16, tag & 0xFFFF, vr, attrs1.getString(tag));
+                return true;
+            }, false);
+
+        } catch (IOException e) {
+            System.err.println("Error reading DICOM file: " + e.getMessage());
+        }
+    }
+}
+```
+
+### Java: Creating DICOM Files with dcm4che
+
+```java
+import org.dcm4che3.data.Attributes;
+import org.dcm4che3.data.Tag;
+import org.dcm4che3.data.UID;
+import org.dcm4che3.data.VR;
+import org.dcm4che3.io.DicomOutputStream;
+import org.dcm4che3.util.UIDUtils;
+
+import java.io.File;
+import java.io.IOException;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
+
+public class CreateDicom {
+    public static void main(String[] args) {
+        // Create File Meta Information
+        Attributes fmi = new Attributes();
+        String sopInstanceUID = UIDUtils.createUID();
+        fmi.setString(Tag.MediaStorageSOPClassUID, VR.UI, UID.CTImageStorage);
+        fmi.setString(Tag.MediaStorageSOPInstanceUID, VR.UI, sopInstanceUID);
+        fmi.setString(Tag.TransferSyntaxUID, VR.UI, UID.ExplicitVRLittleEndian);
+        fmi.setString(Tag.ImplementationClassUID, VR.UI, UIDUtils.createUID());
+        fmi.setString(Tag.ImplementationVersionName, VR.SH, "DCM4CHE_TUTORIAL");
+
+        // Create dataset
+        Attributes attrs = new Attributes();
+
+        // Patient information
+        attrs.setString(Tag.PatientName, VR.PN, "Doe^John");
+        attrs.setString(Tag.PatientID, VR.LO, "12345");
+        attrs.setString(Tag.PatientBirthDate, VR.DA, "19800101");
+        attrs.setString(Tag.PatientSex, VR.CS, "M");
+
+        // Study information
+        attrs.setString(Tag.StudyInstanceUID, VR.UI, UIDUtils.createUID());
+        attrs.setString(Tag.StudyDate, VR.DA,
+            LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMMdd")));
+        attrs.setString(Tag.StudyTime, VR.TM,
+            LocalTime.now().format(DateTimeFormatter.ofPattern("HHmmss")));
+        attrs.setString(Tag.StudyDescription, VR.LO, "Test Study");
+        attrs.setString(Tag.StudyID, VR.SH, "1");
+        attrs.setString(Tag.AccessionNumber, VR.SH, "ACC001");
+
+        // Series information
+        attrs.setString(Tag.SeriesInstanceUID, VR.UI, UIDUtils.createUID());
+        attrs.setInt(Tag.SeriesNumber, VR.IS, 1);
+        attrs.setString(Tag.Modality, VR.CS, "CT");
+
+        // SOP information
+        attrs.setString(Tag.SOPClassUID, VR.UI, UID.CTImageStorage);
+        attrs.setString(Tag.SOPInstanceUID, VR.UI, sopInstanceUID);
+        attrs.setInt(Tag.InstanceNumber, VR.IS, 1);
+
+        // Image pixel attributes
+        attrs.setInt(Tag.SamplesPerPixel, VR.US, 1);
+        attrs.setString(Tag.PhotometricInterpretation, VR.CS, "MONOCHROME2");
+        attrs.setInt(Tag.Rows, VR.US, 256);
+        attrs.setInt(Tag.Columns, VR.US, 256);
+        attrs.setInt(Tag.BitsAllocated, VR.US, 16);
+        attrs.setInt(Tag.BitsStored, VR.US, 12);
+        attrs.setInt(Tag.HighBit, VR.US, 11);
+        attrs.setInt(Tag.PixelRepresentation, VR.US, 0);
+
+        // Create sample pixel data (256x256, 16-bit)
+        byte[] pixelData = new byte[256 * 256 * 2];
+        for (int i = 0; i < pixelData.length; i += 2) {
+            int value = (int) (Math.random() * 4096);
+            pixelData[i] = (byte) (value & 0xFF);
+            pixelData[i + 1] = (byte) ((value >> 8) & 0xFF);
+        }
+        attrs.setBytes(Tag.PixelData, VR.OW, pixelData);
+
+        // Write DICOM file
+        File outputFile = new File("output.dcm");
+        try (DicomOutputStream dos = new DicomOutputStream(outputFile)) {
+            dos.writeDataset(fmi, attrs);
+            System.out.println("DICOM file created: " + outputFile.getAbsolutePath());
+        } catch (IOException e) {
+            System.err.println("Error creating DICOM file: " + e.getMessage());
+        }
+    }
+}
+```
+
+### Java: DICOM Network SCU (C-STORE) with dcm4che
+
+```java
+import org.dcm4che3.data.Attributes;
+import org.dcm4che3.data.Tag;
+import org.dcm4che3.data.UID;
+import org.dcm4che3.io.DicomInputStream;
+import org.dcm4che3.net.*;
+import org.dcm4che3.net.pdu.AAssociateRQ;
+import org.dcm4che3.net.pdu.PresentationContext;
+
+import java.io.File;
+import java.io.IOException;
+import java.security.GeneralSecurityException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+
+public class CStoreSCU {
+    public static void main(String[] args) {
+        if (args.length < 1) {
+            System.err.println("Usage: CStoreSCU <dicom-file>");
+            return;
+        }
+
+        String callingAET = "MY_SCU";
+        String calledAET = "PACS_SCP";
+        String host = "192.168.1.100";
+        int port = 11112;
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+
+        try {
+            // Create device and connection
+            Device device = new Device(callingAET);
+            Connection conn = new Connection();
+            device.addConnection(conn);
+
+            // Create Application Entity
+            ApplicationEntity ae = new ApplicationEntity(callingAET);
+            device.addApplicationEntity(ae);
+            ae.addConnection(conn);
+
+            // Configure executor
+            device.setExecutor(executor);
+            device.setScheduledExecutor(scheduler);
+
+            // Read DICOM file
+            File dicomFile = new File(args[0]);
+            DicomInputStream dis = new DicomInputStream(dicomFile);
+            Attributes fmi = dis.readFileMetaInformation();
+            Attributes data = dis.readDataset();
+            dis.close();
+
+            String sopClassUID = fmi.getString(Tag.MediaStorageSOPClassUID);
+            String sopInstanceUID = fmi.getString(Tag.MediaStorageSOPInstanceUID);
+            String transferSyntax = fmi.getString(Tag.TransferSyntaxUID);
+
+            // Create association request
+            AAssociateRQ rq = new AAssociateRQ();
+            rq.setCalledAET(calledAET);
+            rq.addPresentationContext(
+                new PresentationContext(1, sopClassUID, transferSyntax));
+
+            // Connect and send
+            Connection remoteConn = new Connection(null, host, port);
+            Association assoc = ae.connect(remoteConn, rq);
+
+            // Send C-STORE
+            DimseRSPHandler rspHandler = new DimseRSPHandler(assoc.nextMessageID()) {
+                @Override
+                public void onDimseRSP(Association as, Attributes cmd, Attributes data) {
+                    int status = cmd.getInt(Tag.Status, -1);
+                    System.out.println("C-STORE Response Status: 0x"
+                        + Integer.toHexString(status));
+                }
+            };
+
+            assoc.cstore(sopClassUID, sopInstanceUID,
+                new InputStreamDataWriter(new DicomInputStream(dicomFile)),
+                transferSyntax, rspHandler);
+
+            // Release association
+            assoc.release();
+            System.out.println("C-STORE completed successfully");
+
+        } catch (IOException | InterruptedException | IncompatibleConnectionException
+                 | GeneralSecurityException e) {
+            System.err.println("C-STORE failed: " + e.getMessage());
+        } finally {
+            executor.shutdown();
+            scheduler.shutdown();
+        }
+    }
+}
+```
+
+### Java: DICOM Network SCP (Storage Server) with dcm4che
+
+```java
+import org.dcm4che3.data.Attributes;
+import org.dcm4che3.data.Tag;
+import org.dcm4che3.data.VR;
+import org.dcm4che3.io.DicomOutputStream;
+import org.dcm4che3.net.*;
+import org.dcm4che3.net.pdu.PresentationContext;
+import org.dcm4che3.net.service.BasicCEchoSCP;
+import org.dcm4che3.net.service.BasicCStoreSCP;
+import org.dcm4che3.net.service.DicomServiceRegistry;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+
+public class CStoreSCP {
+    private static final String AE_TITLE = "MY_SCP";
+    private static final int PORT = 11112;
+    private static final String STORAGE_DIR = "./received_dicom";
+
+    private static final BasicCStoreSCP cstoreSCP = new BasicCStoreSCP("*") {
+        @Override
+        protected void store(Association as, PresentationContext pc,
+                             Attributes rq, PDVInputStream data, Attributes rsp)
+                throws IOException {
+            // Get SOP Instance UID for filename
+            String sopInstanceUID = rq.getString(Tag.AffectedSOPInstanceUID);
+            String sopClassUID = rq.getString(Tag.AffectedSOPClassUID);
+
+            // Read the incoming DICOM data
+            Attributes attrs = data.readDataset(pc.getTransferSyntax());
+
+            // Create storage directory if needed
+            File storageDir = new File(STORAGE_DIR);
+            storageDir.mkdirs();
+
+            // Create File Meta Information
+            Attributes fmi = as.createFileMetaInformation(sopInstanceUID,
+                sopClassUID, pc.getTransferSyntax());
+
+            // Save to disk
+            File outputFile = new File(storageDir, sopInstanceUID + ".dcm");
+            try (DicomOutputStream dos = new DicomOutputStream(outputFile)) {
+                dos.writeDataset(fmi, attrs);
+            }
+
+            System.out.println("Stored: " + outputFile.getName()
+                + " from " + as.getCallingAET());
+        }
+    };
+
+    public static void main(String[] args) {
+        ExecutorService executor = Executors.newCachedThreadPool();
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+
+        // Create device
+        Device device = new Device(AE_TITLE);
+        device.setExecutor(executor);
+        device.setScheduledExecutor(scheduler);
+
+        // Create connection
+        Connection conn = new Connection();
+        conn.setPort(PORT);
+        conn.setReceivePDULength(Connection.DEF_MAX_PDU_LENGTH);
+        device.addConnection(conn);
+
+        // Create Application Entity
+        ApplicationEntity ae = new ApplicationEntity(AE_TITLE);
+        ae.setAssociationAcceptor(true);
+        ae.addConnection(conn);
+        device.addApplicationEntity(ae);
+
+        // Register DICOM services
+        DicomServiceRegistry serviceRegistry = new DicomServiceRegistry();
+        serviceRegistry.addDicomService(new BasicCEchoSCP());   // C-ECHO support
+        serviceRegistry.addDicomService(cstoreSCP);              // C-STORE support
+        ae.setDimseRQHandler(serviceRegistry);
+
+        // Accept all transfer syntaxes for all SOP classes
+        ae.addTransferCapability(new TransferCapability(null, "*",
+            TransferCapability.Role.SCP,
+            "*"));
+
+        try {
+            device.bindConnections();
+            System.out.println("DICOM SCP started on port " + PORT);
+            System.out.println("AE Title: " + AE_TITLE);
+            System.out.println("Waiting for incoming associations...");
+        } catch (Exception e) {
+            System.err.println("Failed to start SCP: " + e.getMessage());
+            executor.shutdown();
+            scheduler.shutdown();
+        }
+    }
+}
+```
+
+### Java: DICOM Query (C-FIND) with dcm4che
+
+```java
+import org.dcm4che3.data.Attributes;
+import org.dcm4che3.data.Tag;
+import org.dcm4che3.data.UID;
+import org.dcm4che3.data.VR;
+import org.dcm4che3.net.*;
+import org.dcm4che3.net.pdu.AAssociateRQ;
+import org.dcm4che3.net.pdu.PresentationContext;
+
+import java.io.IOException;
+import java.security.GeneralSecurityException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+
+public class CFindSCU {
+    public static void main(String[] args) {
+        String callingAET = "MY_FIND_SCU";
+        String calledAET = "PACS_SCP";
+        String host = "192.168.1.100";
+        int port = 11112;
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+
+        try {
+            // Create device and Application Entity
+            Device device = new Device(callingAET);
+            Connection conn = new Connection();
+            device.addConnection(conn);
+
+            ApplicationEntity ae = new ApplicationEntity(callingAET);
+            device.addApplicationEntity(ae);
+            ae.addConnection(conn);
+
+            device.setExecutor(executor);
+            device.setScheduledExecutor(scheduler);
+
+            // Create association request with Patient Root Q/R Find
+            AAssociateRQ rq = new AAssociateRQ();
+            rq.setCalledAET(calledAET);
+            rq.addPresentationContext(new PresentationContext(1,
+                UID.PatientRootQueryRetrieveInformationModelFind,
+                UID.ExplicitVRLittleEndian));
+
+            // Build query dataset
+            Attributes queryKeys = new Attributes();
+            queryKeys.setString(Tag.QueryRetrieveLevel, VR.CS, "STUDY");
+            queryKeys.setString(Tag.PatientName, VR.PN, "Smith*");
+            queryKeys.setString(Tag.PatientID, VR.LO, "");
+            queryKeys.setString(Tag.StudyDate, VR.DA, "20240101-20240131");
+            queryKeys.setString(Tag.StudyDescription, VR.LO, "");
+            queryKeys.setString(Tag.StudyInstanceUID, VR.UI, "");
+            queryKeys.setString(Tag.AccessionNumber, VR.SH, "");
+            queryKeys.setString(Tag.ModalitiesInStudy, VR.CS, "");
+
+            // Connect
+            Connection remoteConn = new Connection(null, host, port);
+            Association assoc = ae.connect(remoteConn, rq);
+
+            // Send C-FIND
+            DimseRSPHandler rspHandler = new DimseRSPHandler(assoc.nextMessageID()) {
+                @Override
+                public void onDimseRSP(Association as, Attributes cmd, Attributes data) {
+                    int status = cmd.getInt(Tag.Status, -1);
+
+                    if (status == Status.Pending || status == Status.PendingWarning) {
+                        // Process matching result
+                        System.out.println("\n--- Match Found ---");
+                        System.out.println("Patient: " + data.getString(Tag.PatientName));
+                        System.out.println("Patient ID: " + data.getString(Tag.PatientID));
+                        System.out.println("Study Date: " + data.getString(Tag.StudyDate));
+                        System.out.println("Description: " + data.getString(Tag.StudyDescription));
+                        System.out.println("Study UID: " + data.getString(Tag.StudyInstanceUID));
+                    } else if (status == Status.Success) {
+                        System.out.println("\nC-FIND completed.");
+                    }
+                }
+            };
+
+            assoc.cfind(UID.PatientRootQueryRetrieveInformationModelFind,
+                0, queryKeys, null, rspHandler);
+
+            // Release association
+            assoc.release();
+
+        } catch (IOException | InterruptedException | IncompatibleConnectionException
+                 | GeneralSecurityException e) {
+            System.err.println("C-FIND failed: " + e.getMessage());
+        } finally {
+            executor.shutdown();
+            scheduler.shutdown();
+        }
+    }
+}
+```
+
+### Java: DICOM Anonymization with dcm4che
+
+```java
+import org.dcm4che3.data.Attributes;
+import org.dcm4che3.data.Tag;
+import org.dcm4che3.data.VR;
+import org.dcm4che3.io.DicomInputStream;
+import org.dcm4che3.io.DicomOutputStream;
+import org.dcm4che3.util.UIDUtils;
+
+import java.io.File;
+import java.io.IOException;
+
+public class AnonymizeDicom {
+    public static void main(String[] args) {
+        if (args.length < 2) {
+            System.err.println("Usage: AnonymizeDicom <input.dcm> <output.dcm>");
+            return;
+        }
+
+        File inputFile = new File(args[0]);
+        File outputFile = new File(args[1]);
+
+        try (DicomInputStream dis = new DicomInputStream(inputFile)) {
+            Attributes fmi = dis.readFileMetaInformation();
+            Attributes attrs = dis.readDataset();
+
+            // Remove/replace patient identifying information
+            attrs.setString(Tag.PatientName, VR.PN, "ANONYMOUS");
+            attrs.setString(Tag.PatientID, VR.LO, "ANON_" + System.currentTimeMillis());
+            attrs.setNull(Tag.PatientBirthDate, VR.DA);
+            attrs.setNull(Tag.PatientAddress, VR.LO);
+            attrs.setNull(Tag.PatientTelephoneNumbers, VR.SH);
+
+            // Remove institution and physician info
+            attrs.setNull(Tag.InstitutionName, VR.LO);
+            attrs.setNull(Tag.InstitutionAddress, VR.ST);
+            attrs.setNull(Tag.ReferringPhysicianName, VR.PN);
+            attrs.setNull(Tag.PerformingPhysicianName, VR.PN);
+            attrs.setNull(Tag.OperatorsName, VR.PN);
+
+            // Generate new UIDs to break linkage to original data
+            attrs.setString(Tag.StudyInstanceUID, VR.UI, UIDUtils.createUID());
+            attrs.setString(Tag.SeriesInstanceUID, VR.UI, UIDUtils.createUID());
+            String newSOPInstanceUID = UIDUtils.createUID();
+            attrs.setString(Tag.SOPInstanceUID, VR.UI, newSOPInstanceUID);
+
+            // Update file meta information with new SOP Instance UID
+            fmi.setString(Tag.MediaStorageSOPInstanceUID, VR.UI, newSOPInstanceUID);
+
+            // Remove private tags (odd group numbers may contain PHI)
+            attrs.removePrivateAttributes();
+
+            // Write anonymized file
+            try (DicomOutputStream dos = new DicomOutputStream(outputFile)) {
+                dos.writeDataset(fmi, attrs);
+            }
+
+            System.out.println("Anonymized DICOM file saved: " + outputFile.getAbsolutePath());
+
+        } catch (IOException e) {
+            System.err.println("Anonymization failed: " + e.getMessage());
+        }
+    }
+}
+```
+
+### Java: Maven Project Setup for DICOM Development
+
+```xml
+<!-- pom.xml - Maven project configuration for dcm4che-based DICOM development -->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example</groupId>
+    <artifactId>dicom-tutorial</artifactId>
+    <version>1.0-SNAPSHOT</version>
+
+    <properties>
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
+        <dcm4che.version>5.31.1</dcm4che.version>
+    </properties>
+
+    <repositories>
+        <repository>
+            <id>dcm4che-repo</id>
+            <url>https://www.dcm4che.org/maven2</url>
+        </repository>
+    </repositories>
+
+    <dependencies>
+        <!-- Core DICOM data model and I/O -->
+        <dependency>
+            <groupId>org.dcm4che</groupId>
+            <artifactId>dcm4che-core</artifactId>
+            <version>${dcm4che.version}</version>
+        </dependency>
+        <!-- DICOM networking (associations, DIMSE services) -->
+        <dependency>
+            <groupId>org.dcm4che</groupId>
+            <artifactId>dcm4che-net</artifactId>
+            <version>${dcm4che.version}</version>
+        </dependency>
+        <!-- Image I/O and codec support -->
+        <dependency>
+            <groupId>org.dcm4che</groupId>
+            <artifactId>dcm4che-imageio</artifactId>
+            <version>${dcm4che.version}</version>
+        </dependency>
+        <!-- JSON representation of DICOM data -->
+        <dependency>
+            <groupId>org.dcm4che</groupId>
+            <artifactId>dcm4che-json</artifactId>
+            <version>${dcm4che.version}</version>
+        </dependency>
+    </dependencies>
+</project>
+```
+
+```groovy
+// build.gradle - Gradle project configuration for dcm4che-based DICOM development
+plugins {
+    id 'java'
+    id 'application'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+}
+
+repositories {
+    mavenCentral()
+    maven { url 'https://www.dcm4che.org/maven2' }
+}
+
+def dcm4cheVersion = '5.31.1'
+
+dependencies {
+    implementation "org.dcm4che:dcm4che-core:${dcm4cheVersion}"
+    implementation "org.dcm4che:dcm4che-net:${dcm4cheVersion}"
+    implementation "org.dcm4che:dcm4che-imageio:${dcm4cheVersion}"
+    implementation "org.dcm4che:dcm4che-json:${dcm4cheVersion}"
+}
+```
+
 ---
 
 ## Best Practices
@@ -1267,6 +1911,55 @@ ae.dimse_timeout = 60    # DIMSE operation timeout
 # For large files, increase timeout
 if file_size > 100_000_000:  # 100 MB
     ae.dimse_timeout = 300  # 5 minutes
+```
+
+### 11. Java Resource Management
+
+**Problem**: Not properly closing DICOM streams and network connections, leading to resource leaks
+
+**Solution**: Use try-with-resources and ensure proper cleanup
+```java
+// Always use try-with-resources for DicomInputStream
+try (DicomInputStream dis = new DicomInputStream(new File("image.dcm"))) {
+    Attributes attrs = dis.readDataset();
+    // Process attributes...
+} // Stream is automatically closed
+
+// Always shut down executors after network operations
+ExecutorService executor = Executors.newSingleThreadExecutor();
+ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+try {
+    // ... perform DICOM operations ...
+} finally {
+    executor.shutdown();
+    scheduler.shutdown();
+}
+
+// Release associations in a finally block
+Association assoc = null;
+try {
+    assoc = ae.connect(remoteConn, rq);
+    // ... send DIMSE messages ...
+} finally {
+    if (assoc != null && assoc.isReadyForDataTransfer()) {
+        assoc.release();
+    }
+}
+```
+
+### 12. Java Thread Safety with dcm4che
+
+**Problem**: Sharing DICOM objects across threads without proper synchronization
+
+**Solution**: Create thread-local copies or synchronize access
+```java
+// Attributes objects are NOT thread-safe
+// Create a copy for each thread if sharing is needed
+Attributes original = dis.readDataset();
+Attributes threadCopy = new Attributes(original); // Deep copy
+
+// For concurrent SCP implementations, each association handler
+// runs in its own thread - avoid sharing mutable state between handlers
 ```
 
 ---
