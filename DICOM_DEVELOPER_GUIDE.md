@@ -4156,6 +4156,2174 @@ public class ReadDicom {
 
 ---
 
+## Private Tags & Vendor Extensions
+
+### Understanding Private Tags
+
+Private tags allow vendors to extend DICOM with proprietary information without conflicting with standard tags.
+
+#### Private Tag Structure
+
+**Private Tags have ODD group numbers** (0001, 0009, 0011, 0019, 0029, etc.)
+
+```
+Tag Structure: (GGGG,EEEE)
+- GGGG (Group): Must be ODD for private
+- EEEE (Element): 0000-00FF reserved for Private Creator
+                  0100-FFFF for private data elements
+```
+
+### Private Creator Elements
+
+Before using private data elements, a vendor must "reserve" a block using a Private Creator element.
+
+**Private Creator Pattern**:
+```
+1. Choose odd group (e.g., 0029)
+2. Find unused element 0010-00FF (e.g., 0010)
+3. Store vendor identifier string (e.g., "SIEMENS CSA HEADER")
+4. Use elements 1000-10FF with that creator
+
+Example:
+(0029,0010) LO "SIEMENS CSA HEADER"     ← Private Creator
+(0029,1008) OB [binary data]            ← Private data using block 10
+(0029,1009) CS "IMAGE"                  ← Private data using block 10
+```
+
+### Working with Private Tags
+
+```python
+def add_private_tag(dataset, group, creator_name, element_offset, vr, value):
+    """Add a private tag to dataset"""
+    # Ensure group is odd
+    if group % 2 == 0:
+        raise ValueError(f"Group {group:04X} must be odd for private tags")
+    
+    # Find or create private creator element
+    creator_element = None
+    for elem_num in range(0x0010, 0x0100):
+        tag = (group, elem_num)
+        if tag in dataset:
+            if dataset[tag].value == creator_name:
+                creator_element = elem_num
+                break
+        else:
+            # Found unused slot
+            dataset[tag] = DataElement(tag, 'LO', creator_name)
+            creator_element = elem_num
+            break
+    
+    if creator_element is None:
+        raise RuntimeError("No available private creator slots")
+    
+    # Calculate private data element tag
+    block = creator_element & 0x00FF
+    private_tag = (group, (block << 8) | element_offset)
+    
+    # Add private data element
+    dataset[private_tag] = DataElement(private_tag, vr, value)
+    
+    return private_tag
+
+def read_private_tag(dataset, group, creator_name, element_offset):
+    """Read a private tag from dataset"""
+    # Find private creator block
+    for elem_num in range(0x0010, 0x0100):
+        tag = (group, elem_num)
+        if tag in dataset and dataset[tag].value == creator_name:
+            block = elem_num & 0x00FF
+            private_tag = (group, (block << 8) | element_offset)
+            return dataset.get(private_tag)
+    
+    return None
+```
+
+### Common Vendor Private Tags
+
+#### Siemens Private Tags
+
+```python
+# CSA (Common Syngo Application) Headers
+SIEMENS_CSA_CREATOR = "SIEMENS CSA HEADER"
+
+# Common Siemens private tags
+siemens_tags = {
+    (0x0029, 0x1008): "CSA Image Header Info",
+    (0x0029, 0x1009): "CSA Image Header Type",
+    (0x0029, 0x1010): "CSA Image Header Version",
+    (0x0029, 0x1018): "CSA Series Header Info",
+    (0x0029, 0x1019): "CSA Series Header Type",
+    (0x0029, 0x1020): "CSA Series Header Version",
+}
+
+# Siemens MR Protocol
+SIEMENS_MR_CREATOR = "SIEMENS MR HEADER"
+```
+
+#### GE Private Tags
+
+```python
+# GE Medical Systems
+GE_CREATOR = "GEMS_"  # Various GE creators
+
+# Common GE private tags
+ge_tags = {
+    (0x0009, 0x1001): "GE Full fidelity",
+    (0x0019, 0x10xx): "GE MR acquisition parameters",
+    (0x0043, 0x10xx): "GE scanning sequence parameters",
+}
+```
+
+#### Philips Private Tags
+
+```python
+# Philips Medical Systems
+PHILIPS_CREATOR = "Philips"
+
+# Common Philips private tags
+philips_tags = {
+    (0x2001, 0x10xx): "Philips private group",
+    (0x2005, 0x10xx): "Philips imaging parameters",
+}
+```
+
+### Private Data Dictionary
+
+```python
+class PrivateTagDictionary:
+    """Registry for known private tags"""
+    def __init__(self):
+        self.registry = {}
+    
+    def register(self, group, creator, element_offset, name, vr):
+        """Register a private tag definition"""
+        key = (group, creator, element_offset)
+        self.registry[key] = {'name': name, 'vr': vr}
+    
+    def lookup(self, dataset, group, element):
+        """Look up private tag info from dataset"""
+        # Find creator for this element
+        block = (element >> 8) & 0xFF
+        creator_tag = (group, block)
+        
+        if creator_tag in dataset:
+            creator = dataset[creator_tag].value
+            element_offset = element & 0xFF
+            key = (group, creator, element_offset)
+            return self.registry.get(key)
+        
+        return None
+
+# Initialize with known tags
+private_dict = PrivateTagDictionary()
+
+# Register Siemens tags
+private_dict.register(0x0029, "SIEMENS CSA HEADER", 0x08, "CSA Image Header Info", "OB")
+private_dict.register(0x0029, "SIEMENS CSA HEADER", 0x09, "CSA Image Header Type", "CS")
+```
+
+### Handling Unknown Private Tags
+
+```python
+def anonymize_with_private_tags(dataset, keep_known_private=False):
+    """Anonymize dataset, optionally preserving known private tags"""
+    private_creators = set()
+    
+    # Identify all private groups
+    for tag in list(dataset.keys()):
+        if tag.group % 2 == 1:  # Odd group = private
+            if keep_known_private:
+                # Check if this is a known vendor tag
+                if is_known_private_tag(dataset, tag):
+                    continue
+            
+            # Remove private tag
+            del dataset[tag]
+
+def is_known_private_tag(dataset, tag):
+    """Check if private tag is from known vendor"""
+    group = tag.group
+    element = tag.element
+    
+    if element < 0x0010:
+        # Group length or private creator - keep
+        return True
+    
+    # Check creator
+    block = (element >> 8) & 0xFF
+    creator_tag = (group, block)
+    
+    if creator_tag in dataset:
+        creator = dataset[creator_tag].value
+        known_creators = ['SIEMENS', 'GE', 'PHILIPS', 'TOSHIBA']
+        return any(kc in creator.upper() for kc in known_creators)
+    
+    return False
+```
+
+---
+
+## DICOM Modality-Specific Guide
+
+### CT (Computed Tomography)
+
+#### Key CT-Specific Attributes
+
+| Tag | Name | Purpose |
+|-----|------|---------|
+| (0018,0060) | KVP | X-ray tube voltage in kV |
+| (0018,1030) | Protocol Name | Scanning protocol |
+| (0018,1100) | Reconstruction Diameter | Field of view |
+| (0018,1120) | Gantry/Detector Tilt | Gantry tilt angle |
+| (0018,1150) | Exposure Time | X-ray exposure duration |
+| (0018,1151) | X-Ray Tube Current | mA during acquisition |
+| (0018,9345) | CTDIvol | Radiation dose indicator |
+| (0028,1050) | Window Center | For viewing (lung, bone, soft tissue) |
+| (0028,1051) | Window Width | For viewing |
+| (0028,1052) | Rescale Intercept | Convert to Hounsfield Units (HU) |
+| (0028,1053) | Rescale Slope | Convert to Hounsfield Units |
+
+#### Hounsfield Units (HU)
+
+```python
+def convert_to_hounsfield(pixel_array, dataset):
+    """Convert pixel values to Hounsfield Units"""
+    slope = float(dataset.RescaleSlope)
+    intercept = float(dataset.RescaleIntercept)
+    
+    # HU = pixel_value * slope + intercept
+    hu_array = pixel_array.astype(np.float64) * slope + intercept
+    
+    return hu_array
+
+# Common HU ranges
+HU_RANGES = {
+    'air': -1000,
+    'lung': (-500, -950),
+    'fat': (-100, -50),
+    'water': 0,
+    'soft_tissue': (40, 80),
+    'bone': (400, 1000),
+    'metal': (1000, 3000)
+}
+```
+
+#### Standard CT Window Presets
+
+```python
+CT_WINDOWS = {
+    'lung': {'center': -600, 'width': 1500},
+    'mediastinum': {'center': 50, 'width': 350},
+    'bone': {'center': 400, 'width': 1800},
+    'brain': {'center': 40, 'width': 80},
+    'subdural': {'center': 80, 'width': 200},
+    'liver': {'center': 60, 'width': 160},
+}
+```
+
+### MR (Magnetic Resonance)
+
+#### Key MR-Specific Attributes
+
+| Tag | Name | Purpose |
+|-----|------|---------|
+| (0018,0020) | Scanning Sequence | SE, IR, GR, EP, RM |
+| (0018,0021) | Sequence Variant | SK, MTC, SS, TRSS, SP, MP, OSP |
+| (0018,0023) | MR Acquisition Type | 2D or 3D |
+| (0018,0080) | Repetition Time (TR) | ms between pulses |
+| (0018,0081) | Echo Time (TE) | ms to echo |
+| (0018,0082) | Inversion Time (TI) | ms for inversion recovery |
+| (0018,0083) | Number of Averages | Signal averaging |
+| (0018,0084) | Imaging Frequency | MHz (1.5T = 63.87 MHz, 3T = 127.74 MHz) |
+| (0018,0085) | Imaged Nucleus | 1H (proton), 31P, etc. |
+| (0018,0087) | Magnetic Field Strength | Tesla (1.5, 3.0, 7.0) |
+| (0018,0091) | Echo Train Length | For FSE/TSE sequences |
+| (0018,0093) | Percent Sampling | k-space coverage |
+| (0018,0094) | Percent Phase Field of View | Phase encoding FOV |
+| (0018,0095) | Pixel Bandwidth | Hz per pixel |
+| (0018,1314) | Flip Angle | degrees |
+
+#### Common MR Sequences
+
+```python
+MR_SEQUENCES = {
+    'T1': {
+        'short_TR': (400, 600),  # ms
+        'short_TE': (10, 20),    # ms
+        'contrast': 'anatomical detail'
+    },
+    'T2': {
+        'long_TR': (2000, 6000),
+        'long_TE': (80, 120),
+        'contrast': 'fluid bright'
+    },
+    'FLAIR': {
+        'long_TR': (6000, 10000),
+        'long_TE': (100, 140),
+        'long_TI': (2000, 2500),
+        'contrast': 'CSF suppressed'
+    },
+    'DWI': {
+        'sequence': 'EP',
+        'b_values': [0, 500, 1000],
+        'contrast': 'diffusion restriction'
+    },
+    'GRE': {
+        'gradient_echo': True,
+        'flip_angle': (10, 90),
+        'short_TE': True,
+        'uses': 'susceptibility, angiography'
+    }
+}
+```
+
+#### Diffusion Weighted Imaging (DWI)
+
+```python
+def extract_dwi_parameters(dataset):
+    """Extract DWI-specific parameters"""
+    # B-value (diffusion gradient strength)
+    b_value = read_private_tag(dataset, 0x0019, "SIEMENS MR HEADER", 0x100C)
+    
+    # Diffusion gradient direction
+    diffusion_direction = dataset.get((0x0019, 0x100E))
+    
+    return {
+        'b_value': b_value,
+        'direction': diffusion_direction
+    }
+
+def calculate_adc_map(b0_image, dwi_image, b_value):
+    """Calculate Apparent Diffusion Coefficient map"""
+    # ADC = -ln(S/S0) / b
+    # where S = DWI signal, S0 = b=0 signal
+    
+    # Avoid division by zero
+    b0_image = np.maximum(b0_image, 1)
+    dwi_image = np.maximum(dwi_image, 1)
+    
+    signal_ratio = dwi_image / b0_image
+    adc = -np.log(signal_ratio) / b_value
+    
+    # Typical ADC range: 0-3 x 10^-3 mm²/s
+    adc = np.clip(adc, 0, 0.003)
+    
+    return adc
+```
+
+### US (Ultrasound)
+
+#### Key US-Specific Attributes
+
+| Tag | Name | Purpose |
+|-----|------|---------|
+| (0018,1063) | Frame Time | ms between frames |
+| (0018,6011) | Sequence of Ultrasound Regions | Region definitions |
+| (0028,0009) | Frame Increment Pointer | Multi-frame timing |
+| (0028,0008) | Number of Frames | Cine loop frames |
+
+#### Ultrasound Regions
+
+```python
+def parse_us_regions(dataset):
+    """Parse ultrasound region sequence"""
+    regions = []
+    
+    if hasattr(dataset, 'SequenceOfUltrasoundRegions'):
+        for region in dataset.SequenceOfUltrasoundRegions:
+            region_info = {
+                'spatial_format': region.get('RegionSpatialFormat', 'UNKNOWN'),
+                'data_type': region.get('RegionDataType', 0),
+                'flags': region.get('RegionFlags', 0),
+                'location': {
+                    'x0': region.get('RegionLocationMinX0', 0),
+                    'y0': region.get('RegionLocationMinY0', 0),
+                    'x1': region.get('RegionLocationMaxX1', 0),
+                    'y1': region.get('RegionLocationMaxY1', 0),
+                },
+                'physical_units': region.get('PhysicalUnitsXDirection', 0)
+            }
+            regions.append(region_info)
+    
+    return regions
+```
+
+### XA/XRF (X-Ray Angiography)
+
+#### Key XA-Specific Attributes
+
+| Tag | Name | Purpose |
+|-----|------|---------|
+| (0008,2144) | Recommended Display Frame Rate | fps for playback |
+| (0018,1063) | Frame Time | ms per frame |
+| (0018,1065) | Frame Time Vector | Variable frame rates |
+| (0018,1066) | Frame Delay | Delay between frames |
+| (0018,1510) | Positioner Primary Angle | C-arm rotation |
+| (0018,1511) | Positioner Secondary Angle | C-arm angulation |
+
+### NM (Nuclear Medicine)
+
+#### Key NM-Specific Attributes
+
+| Tag | Name | Purpose |
+|-----|------|---------|
+| (0018,1070) | Radiopharmaceutical Information Sequence | Tracer details |
+| (0018,1074) | Radionuclide Total Dose | Administered activity |
+| (0018,1075) | Radionuclide Half Life | Decay half-life |
+| (0018,1076) | Radionuclide Positron Fraction | For PET |
+| (0054,0011) | Number of Slices | Tomographic slices |
+| (0054,0081) | Number of Time Slices | Dynamic imaging |
+| (0054,1001) | Units | COUNTS, CNTS/SEC, etc. |
+| (0054,1300) | Frame Reference Time | Time of frame start |
+| (0054,1321) | Decay Correction | Applied decay correction |
+
+### RT (Radiotherapy)
+
+#### RT Structure Set
+
+```python
+def parse_rt_structure_set(dataset):
+    """Parse RT Structure Set"""
+    structures = []
+    
+    if hasattr(dataset, 'StructureSetROISequence'):
+        for roi in dataset.StructureSetROISequence:
+            structure = {
+                'number': roi.ROINumber,
+                'name': roi.ROIName,
+                'description': roi.get('ROIDescription', ''),
+                'type': roi.get('ROIGenerationAlgorithm', 'MANUAL'),
+                'frame_of_reference': roi.ReferencedFrameOfReferenceUID
+            }
+            structures.append(structure)
+    
+    # Get contour data
+    if hasattr(dataset, 'ROIContourSequence'):
+        for contour_seq in dataset.ROIContourSequence:
+            roi_num = contour_seq.ReferencedROINumber
+            # Find matching structure
+            for struct in structures:
+                if struct['number'] == roi_num:
+                    struct['contours'] = parse_contours(contour_seq)
+    
+    return structures
+
+def parse_contours(contour_sequence):
+    """Parse contour geometric data"""
+    contours = []
+    
+    if hasattr(contour_sequence, 'ContourSequence'):
+        for contour in contour_sequence.ContourSequence:
+            contour_data = {
+                'type': contour.ContourGeometricType,  # POINT, POLYLINE, CLOSED_PLANAR
+                'num_points': contour.NumberOfContourPoints,
+                'points': np.array(contour.ContourData).reshape(-1, 3)  # (x, y, z)
+            }
+            contours.append(contour_data)
+    
+    return contours
+```
+
+#### RT Dose
+
+```python
+def extract_dose_grid(dataset):
+    """Extract dose distribution from RT Dose object"""
+    # Get dose grid scaling
+    dose_grid_scaling = float(dataset.DoseGridScaling)
+    
+    # Get pixel data
+    dose_array = dataset.pixel_array
+    
+    # Scale to absolute dose (Gy)
+    dose_gy = dose_array * dose_grid_scaling
+    
+    # Get dose summation type
+    summation_type = dataset.DoseSummationType  # PLAN, BEAM, FRACTION, etc.
+    
+    # Get dose units
+    dose_units = dataset.DoseUnits  # GY or RELATIVE
+    
+    return {
+        'dose_array': dose_gy,
+        'summation_type': summation_type,
+        'units': dose_units,
+        'max_dose': dose_gy.max(),
+        'mean_dose': dose_gy.mean()
+    }
+```
+
+---
+
+## Building Production DICOM Systems
+
+### System Architecture Patterns
+
+#### Pattern 1: Classic PACS Architecture
+
+```
+┌─────────────┐
+│  Modalities │
+│  (CT, MR)   │
+└──────┬──────┘
+       │ C-STORE
+       ↓
+┌─────────────┐      ┌──────────────┐
+│   Gateway   │←────→│  RIS/HIS     │
+│   (Router)  │      │  (HL7/FHIR)  │
+└──────┬──────┘      └──────────────┘
+       │
+       ↓
+┌─────────────┐
+│    PACS     │
+│  Archive    │
+│  (Storage)  │
+└──────┬──────┘
+       │
+       ↓
+┌─────────────┐
+│  Workstation│
+│   Viewers   │
+└─────────────┘
+```
+
+#### Pattern 2: Modern Cloud-Native Architecture
+
+```
+┌─────────────┐
+│  Modalities │
+└──────┬──────┘
+       │ DICOM/DICOMweb
+       ↓
+┌─────────────────────┐
+│   API Gateway       │
+│   (Auth/TLS)        │
+└──────┬──────────────┘
+       │
+    ┌──┴──┐
+    │     ↓
+┌───────┐ ┌──────────┐ ┌────────────┐
+│Ingest │ │  Query   │ │  Retrieve  │
+│Service│ │  Service │ │  Service   │
+└───┬───┘ └────┬─────┘ └──────┬─────┘
+    │          │               │
+    ↓          ↓               ↓
+┌────────────────────────────────┐
+│   Metadata DB (PostgreSQL)     │
+└────────────────────────────────┘
+    │
+    ↓
+┌────────────────────────────────┐
+│   Object Storage (S3)          │
+└────────────────────────────────┘
+```
+
+### Database Schema for DICOM Metadata
+
+```sql
+-- Patient table
+CREATE TABLE patients (
+    patient_id VARCHAR(64) PRIMARY KEY,
+    patient_name VARCHAR(255),
+    patient_birth_date DATE,
+    patient_sex CHAR(1),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Study table
+CREATE TABLE studies (
+    study_instance_uid VARCHAR(64) PRIMARY KEY,
+    patient_id VARCHAR(64) REFERENCES patients(patient_id),
+    study_date DATE,
+    study_time TIME,
+    study_description TEXT,
+    accession_number VARCHAR(16),
+    modalities_in_study VARCHAR(255),  -- Comma-separated
+    number_of_series INTEGER DEFAULT 0,
+    number_of_instances INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_patient (patient_id),
+    INDEX idx_study_date (study_date),
+    INDEX idx_accession (accession_number)
+);
+
+-- Series table
+CREATE TABLE series (
+    series_instance_uid VARCHAR(64) PRIMARY KEY,
+    study_instance_uid VARCHAR(64) REFERENCES studies(study_instance_uid),
+    series_number INTEGER,
+    series_description TEXT,
+    modality VARCHAR(16),
+    body_part_examined VARCHAR(16),
+    protocol_name VARCHAR(64),
+    number_of_instances INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_study (study_instance_uid),
+    INDEX idx_modality (modality)
+);
+
+-- Instance table
+CREATE TABLE instances (
+    sop_instance_uid VARCHAR(64) PRIMARY KEY,
+    series_instance_uid VARCHAR(64) REFERENCES series(series_instance_uid),
+    instance_number INTEGER,
+    sop_class_uid VARCHAR(64),
+    transfer_syntax_uid VARCHAR(64),
+    rows INTEGER,
+    columns INTEGER,
+    number_of_frames INTEGER DEFAULT 1,
+    file_path VARCHAR(512),  -- Or S3 key
+    file_size BIGINT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_series (series_instance_uid),
+    INDEX idx_sop_class (sop_class_uid)
+);
+```
+
+### High-Performance C-STORE SCP
+
+```python
+from pynetdicom import AE, evt, StoragePresentationContexts
+from concurrent.futures import ThreadPoolExecutor
+import logging
+
+class HighPerformanceSCP:
+    def __init__(self, ae_title, port, storage_path, db_connection):
+        self.ae_title = ae_title
+        self.port = port
+        self.storage_path = storage_path
+        self.db = db_connection
+        self.executor = ThreadPoolExecutor(max_workers=10)
+        
+        # Initialize Application Entity
+        self.ae = AE(ae_title=ae_title)
+        
+        # Add all storage SOP classes
+        self.ae.supported_contexts = StoragePresentationContexts
+        
+        # Configure for high performance
+        self.ae.maximum_pdu_size = 0  # Unlimited
+        self.ae.maximum_associations = 20
+    
+    def handle_store(self, event):
+        """Handle incoming C-STORE request"""
+        dataset = event.dataset
+        context = event.context
+        
+        # Extract key identifiers
+        patient_id = str(dataset.PatientID)
+        study_uid = str(dataset.StudyInstanceUID)
+        series_uid = str(dataset.SeriesInstanceUID)
+        instance_uid = str(dataset.SOPInstanceUID)
+        
+        # Construct storage path
+        file_path = self.construct_file_path(
+            patient_id, study_uid, series_uid, instance_uid
+        )
+        
+        # Save file asynchronously
+        future = self.executor.submit(
+            self.save_instance,
+            dataset,
+            file_path
+        )
+        
+        # Update database asynchronously
+        self.executor.submit(
+            self.update_database,
+            dataset,
+            file_path
+        )
+        
+        # Return success immediately
+        return 0x0000
+    
+    def save_instance(self, dataset, file_path):
+        """Save DICOM instance to disk"""
+        try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            
+            # Save with explicit VR little endian
+            dataset.file_meta.TransferSyntaxUID = '1.2.840.10008.1.2.1'
+            dataset.save_as(file_path, write_like_original=False)
+            
+            logging.info(f"Saved: {file_path}")
+        except Exception as e:
+            logging.error(f"Failed to save {file_path}: {e}")
+    
+    def update_database(self, dataset, file_path):
+        """Update metadata database"""
+        try:
+            # Insert/update patient
+            self.db.upsert_patient(dataset)
+            
+            # Insert/update study
+            self.db.upsert_study(dataset)
+            
+            # Insert/update series
+            self.db.upsert_series(dataset)
+            
+            # Insert instance
+            self.db.insert_instance(dataset, file_path)
+            
+            logging.info(f"Database updated for {dataset.SOPInstanceUID}")
+        except Exception as e:
+            logging.error(f"Database update failed: {e}")
+    
+    def construct_file_path(self, patient_id, study_uid, series_uid, instance_uid):
+        """Construct hierarchical file path"""
+        # Hash UIDs to avoid filesystem limits
+        import hashlib
+        
+        def hash_uid(uid):
+            return hashlib.md5(uid.encode()).hexdigest()[:8]
+        
+        path = os.path.join(
+            self.storage_path,
+            hash_uid(patient_id)[:2],  # First 2 chars for sharding
+            hash_uid(patient_id),
+            hash_uid(study_uid),
+            hash_uid(series_uid),
+            f"{hash_uid(instance_uid)}.dcm"
+        )
+        
+        return path
+    
+    def start(self):
+        """Start SCP server"""
+        handlers = [(evt.EVT_C_STORE, self.handle_store)]
+        
+        self.ae.start_server(
+            ('', self.port),
+            block=True,
+            evt_handlers=handlers
+        )
+```
+
+### Caching Strategy
+
+```python
+from functools import lru_cache
+import redis
+
+class DICOMCache:
+    def __init__(self, redis_host='localhost', redis_port=6379):
+        self.redis = redis.Redis(host=redis_host, port=redis_port)
+        self.thumbnail_cache = {}
+    
+    @lru_cache(maxsize=1000)
+    def get_metadata(self, instance_uid):
+        """Cache DICOM metadata in memory"""
+        # Check Redis first
+        cached = self.redis.get(f"meta:{instance_uid}")
+        if cached:
+            return json.loads(cached)
+        
+        # Load from database
+        metadata = self.load_metadata_from_db(instance_uid)
+        
+        # Cache in Redis (1 hour TTL)
+        self.redis.setex(
+            f"meta:{instance_uid}",
+            3600,
+            json.dumps(metadata)
+        )
+        
+        return metadata
+    
+    def get_thumbnail(self, instance_uid, size=(256, 256)):
+        """Cache thumbnails"""
+        cache_key = f"thumb:{instance_uid}:{size[0]}x{size[1]}"
+        
+        # Check Redis
+        cached = self.redis.get(cache_key)
+        if cached:
+            return pickle.loads(cached)
+        
+        # Generate thumbnail
+        thumbnail = self.generate_thumbnail(instance_uid, size)
+        
+        # Cache in Redis (24 hours)
+        self.redis.setex(
+            cache_key,
+            86400,
+            pickle.dumps(thumbnail)
+        )
+        
+        return thumbnail
+```
+
+### Performance Monitoring
+
+```python
+import time
+from prometheus_client import Counter, Histogram, Gauge
+
+# Metrics
+store_counter = Counter('dicom_store_total', 'Total C-STORE operations')
+store_errors = Counter('dicom_store_errors', 'Failed C-STORE operations')
+store_duration = Histogram('dicom_store_seconds', 'C-STORE operation duration')
+active_associations = Gauge('dicom_active_associations', 'Active DICOM associations')
+
+def monitored_store_handler(event):
+    """C-STORE handler with monitoring"""
+    start_time = time.time()
+    active_associations.inc()
+    
+    try:
+        result = handle_store(event)
+        store_counter.inc()
+        return result
+    except Exception as e:
+        store_errors.inc()
+        logging.error(f"Store failed: {e}")
+        return 0xC000
+    finally:
+        duration = time.time() - start_time
+        store_duration.observe(duration)
+        active_associations.dec()
+```
+
+---
+
+## Performance Optimization & Caching
+
+### Query Performance
+
+#### Indexing Strategy
+
+```sql
+-- Essential indexes for DICOM queries
+CREATE INDEX idx_patients_name ON patients(patient_name);
+CREATE INDEX idx_patients_id ON patients(patient_id);
+
+CREATE INDEX idx_studies_date ON studies(study_date);
+CREATE INDEX idx_studies_patient ON studies(patient_id);
+CREATE INDEX idx_studies_accession ON studies(accession_number);
+CREATE INDEX idx_studies_description ON studies(study_description);
+
+CREATE INDEX idx_series_study ON series(study_instance_uid);
+CREATE INDEX idx_series_modality ON series(modality);
+CREATE INDEX idx_series_desc ON series(series_description);
+
+CREATE INDEX idx_instances_series ON instances(series_instance_uid);
+CREATE INDEX idx_instances_sop ON instances(sop_class_uid);
+
+-- Composite indexes for common queries
+CREATE INDEX idx_study_date_modality ON studies(study_date, modalities_in_study);
+CREATE INDEX idx_patient_study_date ON studies(patient_id, study_date DESC);
+```
+
+#### Query Optimization
+
+```python
+def optimized_study_query(db, patient_name=None, study_date_range=None, modality=None):
+    """Optimized DICOM study query"""
+    query = """
+        SELECT 
+            s.study_instance_uid,
+            s.study_date,
+            s.study_description,
+            s.accession_number,
+            p.patient_name,
+            p.patient_id,
+            COUNT(DISTINCT sr.series_instance_uid) as series_count,
+            COUNT(i.sop_instance_uid) as image_count
+        FROM studies s
+        JOIN patients p ON s.patient_id = p.patient_id
+        LEFT JOIN series sr ON s.study_instance_uid = sr.study_instance_uid
+        LEFT JOIN instances i ON sr.series_instance_uid = i.series_instance_uid
+        WHERE 1=1
+    """
+    
+    params = []
+    
+    if patient_name:
+        # Use LIKE with wildcard for fuzzy matching
+        query += " AND p.patient_name LIKE %s"
+        params.append(f"%{patient_name}%")
+    
+    if study_date_range:
+        query += " AND s.study_date BETWEEN %s AND %s"
+        params.extend(study_date_range)
+    
+    if modality:
+        # Modalities stored as comma-separated
+        query += " AND s.modalities_in_study LIKE %s"
+        params.append(f"%{modality}%")
+    
+    query += """
+        GROUP BY s.study_instance_uid, s.study_date, s.study_description, 
+                 s.accession_number, p.patient_name, p.patient_id
+        ORDER BY s.study_date DESC
+        LIMIT 100
+    """
+    
+    return db.execute(query, params)
+```
+
+### File I/O Optimization
+
+#### Memory-Mapped Files
+
+```python
+import mmap
+
+def read_large_dicom_mmap(file_path):
+    """Use memory mapping for large DICOM files"""
+    with open(file_path, 'rb') as f:
+        # Memory map the file
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mmapped:
+            # Parse DICOM header without loading entire file
+            preamble = mmapped[:128]
+            prefix = mmapped[128:132]
+            
+            if prefix != b'DICM':
+                raise ValueError("Not a valid DICOM file")
+            
+            # Parse file meta information
+            meta_info = parse_file_meta(mmapped[132:])
+            
+            # For pixel data, can seek directly without loading all
+            return meta_info
+```
+
+#### Streaming Pixel Data
+
+```python
+def stream_pixel_data(file_path, frame_callback):
+    """Stream pixel data frame-by-frame without loading all into memory"""
+    import pydicom
+    
+    # Read metadata only (no pixel data)
+    ds = pydicom.dcmread(file_path, stop_before_pixels=True)
+    
+    # Calculate frame size
+    rows = ds.Rows
+    columns = ds.Columns
+    samples_per_pixel = ds.SamplesPerPixel
+    bits_allocated = ds.BitsAllocated
+    number_of_frames = getattr(ds, 'NumberOfFrames', 1)
+    
+    bytes_per_frame = rows * columns * samples_per_pixel * (bits_allocated // 8)
+    
+    # Find pixel data offset
+    with open(file_path, 'rb') as f:
+        # Seek to pixel data tag
+        # (simplified - actual implementation needs proper tag search)
+        pixel_data_offset = find_pixel_data_offset(f)
+        
+        # Stream each frame
+        f.seek(pixel_data_offset)
+        for frame_idx in range(number_of_frames):
+            frame_bytes = f.read(bytes_per_frame)
+            frame_array = np.frombuffer(frame_bytes, dtype=determine_dtype(ds))
+            frame_array = frame_array.reshape(rows, columns)
+            
+            # Process frame immediately
+            frame_callback(frame_idx, frame_array)
+            
+            # Frame is garbage collected after callback
+```
+
+### Network Performance
+
+#### Connection Pooling
+
+```python
+from queue import Queue, Empty
+import threading
+
+class DICOMConnectionPool:
+    """Pool of persistent DICOM associations"""
+    
+    def __init__(self, host, port, ae_title, size=5):
+        self.host = host
+        self.port = port
+        self.ae_title = ae_title
+        self.size = size
+        self.pool = Queue(maxsize=size)
+        self.lock = threading.Lock()
+        
+        # Pre-create connections
+        for _ in range(size):
+            assoc = self._create_association()
+            if assoc:
+                self.pool.put(assoc)
+    
+    def _create_association(self):
+        """Create a new DICOM association"""
+        from pynetdicom import AE
+        
+        ae = AE(ae_title=self.ae_title)
+        ae.add_requested_context('1.2.840.10008.1.1')  # Verification
+        
+        assoc = ae.associate(self.host, self.port)
+        if assoc.is_established:
+            return assoc
+        return None
+    
+    def acquire(self, timeout=10):
+        """Get an association from pool"""
+        try:
+            assoc = self.pool.get(timeout=timeout)
+            
+            # Test if still alive
+            if not assoc.is_established:
+                assoc = self._create_association()
+            
+            return assoc
+        except Empty:
+            # Pool exhausted, create temporary
+            return self._create_association()
+    
+    def release(self, assoc):
+        """Return association to pool"""
+        if assoc and assoc.is_established:
+            try:
+                self.pool.put_nowait(assoc)
+            except:
+                # Pool full, release association
+                assoc.release()
+    
+    def close_all(self):
+        """Close all connections"""
+        while not self.pool.empty():
+            try:
+                assoc = self.pool.get_nowait()
+                assoc.release()
+            except Empty:
+                break
+
+# Usage
+pool = DICOMConnectionPool('pacs.hospital.com', 11112, 'MYAPP', size=10)
+
+def send_image(dataset):
+    assoc = pool.acquire()
+    try:
+        status = assoc.send_c_store(dataset)
+        return status
+    finally:
+        pool.release(assoc)
+```
+
+#### Parallel Transfers
+
+```python
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+def parallel_retrieve(association, instance_uids, max_workers=5):
+    """Retrieve multiple instances in parallel"""
+    results = []
+    failed = []
+    
+    def retrieve_one(instance_uid):
+        """Retrieve single instance"""
+        try:
+            # Create query dataset
+            query = Dataset()
+            query.QueryRetrieveLevel = 'IMAGE'
+            query.SOPInstanceUID = instance_uid
+            
+            # Send C-GET
+            responses = association.send_c_get(query)
+            for status, identifier in responses:
+                if status.Status == 0x0000:
+                    return instance_uid, "SUCCESS"
+                elif status.Status >= 0xC000:
+                    return instance_uid, f"FAILED: {status.Status:04X}"
+        except Exception as e:
+            return instance_uid, f"ERROR: {e}"
+    
+    # Execute in parallel
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(retrieve_one, uid): uid 
+                  for uid in instance_uids}
+        
+        for future in as_completed(futures):
+            uid, status = future.result()
+            if status == "SUCCESS":
+                results.append(uid)
+            else:
+                failed.append((uid, status))
+    
+    return results, failed
+```
+
+### Caching Strategies
+
+#### Multi-Level Cache
+
+```python
+import redis
+import pickle
+from functools import lru_cache
+
+class MultiLevelCache:
+    """L1 (memory) + L2 (Redis) cache"""
+    
+    def __init__(self, redis_host='localhost'):
+        self.redis = redis.Redis(host=redis_host, decode_responses=False)
+        self.l1_cache = {}
+        self.l1_max_size = 1000
+    
+    def get(self, key):
+        """Get from cache with fallback"""
+        # L1 cache (memory)
+        if key in self.l1_cache:
+            return self.l1_cache[key]
+        
+        # L2 cache (Redis)
+        value = self.redis.get(key)
+        if value:
+            obj = pickle.loads(value)
+            # Promote to L1
+            self._put_l1(key, obj)
+            return obj
+        
+        return None
+    
+    def put(self, key, value, ttl=3600):
+        """Put in both cache levels"""
+        # L1
+        self._put_l1(key, value)
+        
+        # L2 with TTL
+        self.redis.setex(key, ttl, pickle.dumps(value))
+    
+    def _put_l1(self, key, value):
+        """Put in L1 cache with size limit"""
+        if len(self.l1_cache) >= self.l1_max_size:
+            # Evict random item (could use LRU)
+            self.l1_cache.pop(next(iter(self.l1_cache)))
+        self.l1_cache[key] = value
+
+# Usage
+cache = MultiLevelCache()
+
+def get_study_metadata(study_uid):
+    # Check cache first
+    cached = cache.get(f"study:{study_uid}")
+    if cached:
+        return cached
+    
+    # Load from database
+    metadata = load_from_database(study_uid)
+    
+    # Cache for 1 hour
+    cache.put(f"study:{study_uid}", metadata, ttl=3600)
+    
+    return metadata
+```
+
+#### Thumbnail Cache
+
+```python
+def cached_thumbnail_pipeline(instance_path, size=(256, 256)):
+    """Generate and cache thumbnail"""
+    cache_key = f"thumb:{hash(instance_path)}:{size[0]}x{size[1]}"
+    
+    # Check cache
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+    
+    # Generate thumbnail
+    ds = pydicom.dcmread(instance_path)
+    pixel_array = get_display_ready_pixels(ds, frame=0)
+    
+    # Resize
+    from PIL import Image
+    if len(pixel_array.shape) == 2:
+        img = Image.fromarray(pixel_array, mode='L')
+    else:
+        img = Image.fromarray(pixel_array, mode='RGB')
+    
+    img.thumbnail(size, Image.LANCZOS)
+    
+    # Convert to bytes for caching
+    import io
+    buffer = io.BytesIO()
+    img.save(buffer, format='PNG')
+    thumbnail_bytes = buffer.getvalue()
+    
+    # Cache for 24 hours
+    cache.put(cache_key, thumbnail_bytes, ttl=86400)
+    
+    return thumbnail_bytes
+```
+
+### Database Optimization
+
+#### Batch Inserts
+
+```python
+def batch_insert_instances(db, instances):
+    """Insert multiple instances efficiently"""
+    # Prepare batch insert
+    query = """
+        INSERT INTO instances 
+        (sop_instance_uid, series_instance_uid, instance_number, 
+         sop_class_uid, file_path, file_size)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (sop_instance_uid) DO NOTHING
+    """
+    
+    # Collect all values
+    values = []
+    for ds, file_path, file_size in instances:
+        values.append((
+            ds.SOPInstanceUID,
+            ds.SeriesInstanceUID,
+            int(ds.InstanceNumber),
+            ds.SOPClassUID,
+            file_path,
+            file_size
+        ))
+    
+    # Execute batch insert
+    db.executemany(query, values)
+    db.commit()
+```
+
+#### Partitioning
+
+```sql
+-- Partition studies table by date
+CREATE TABLE studies (
+    study_instance_uid VARCHAR(64) PRIMARY KEY,
+    study_date DATE NOT NULL,
+    -- ... other columns
+) PARTITION BY RANGE (study_date);
+
+-- Create partitions for each year
+CREATE TABLE studies_2024 PARTITION OF studies
+    FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
+
+CREATE TABLE studies_2025 PARTITION OF studies
+    FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+```
+
+---
+
+## DICOM Validation & Compliance
+
+### IOD Validation
+
+#### Module Compliance Checking
+
+```python
+class IODValidator:
+    """Validate DICOM datasets against IOD definitions"""
+    
+    def __init__(self):
+        # Load IOD definitions from PS3.3
+        self.iod_definitions = self.load_iod_definitions()
+    
+    def validate_dataset(self, dataset, sop_class_uid):
+        """Validate dataset against SOP Class IOD"""
+        errors = []
+        warnings = []
+        
+        # Get IOD definition for SOP Class
+        iod = self.get_iod_for_sop_class(sop_class_uid)
+        
+        if not iod:
+            return [f"Unknown SOP Class: {sop_class_uid}"], []
+        
+        # Check each module in IOD
+        for module in iod['modules']:
+            module_errors, module_warnings = self.validate_module(
+                dataset, module
+            )
+            errors.extend(module_errors)
+            warnings.extend(module_warnings)
+        
+        return errors, warnings
+    
+    def validate_module(self, dataset, module):
+        """Validate a single module"""
+        errors = []
+        warnings = []
+        
+        module_name = module['name']
+        usage = module['usage']  # M (Mandatory), C (Conditional), U (User Option)
+        
+        # Check required attributes
+        for attr in module['attributes']:
+            tag = attr['tag']
+            requirement = attr['type']  # 1, 1C, 2, 2C, 3
+            
+            if tag not in dataset:
+                if requirement == '1':
+                    errors.append(f"{module_name}: Missing required attribute {tag}")
+                elif requirement == '1C':
+                    if self.is_conditional_required(dataset, attr):
+                        errors.append(f"{module_name}: Missing conditional attribute {tag}")
+                elif requirement == '2':
+                    warnings.append(f"{module_name}: Missing type 2 attribute {tag}")
+            else:
+                # Check value validity
+                value_errors = self.validate_value(dataset[tag], attr)
+                errors.extend([f"{module_name}: {e}" for e in value_errors])
+        
+        return errors, warnings
+    
+    def validate_value(self, element, attribute_def):
+        """Validate attribute value"""
+        errors = []
+        
+        vr = attribute_def['vr']
+        value = element.value
+        
+        # Check value exists for type 1 and 2
+        if attribute_def['type'] in ['1', '2'] and not value:
+            errors.append(f"Empty value for {element.tag}")
+        
+        # Check VR-specific constraints
+        if vr == 'DA':  # Date
+            if not self.is_valid_dicom_date(value):
+                errors.append(f"Invalid date format: {value}")
+        elif vr == 'TM':  # Time
+            if not self.is_valid_dicom_time(value):
+                errors.append(f"Invalid time format: {value}")
+        elif vr == 'UI':  # UID
+            if not self.is_valid_uid(value):
+                errors.append(f"Invalid UID: {value}")
+        elif vr in ['IS', 'DS']:  # Integer/Decimal String
+            if not self.is_valid_number_string(value, vr):
+                errors.append(f"Invalid {vr}: {value}")
+        
+        # Check value multiplicity
+        if hasattr(attribute_def, 'vm'):
+            vm = attribute_def['vm']
+            if not self.check_value_multiplicity(value, vm):
+                errors.append(f"Value multiplicity violation: expected {vm}, got {len(value)}")
+        
+        return errors
+    
+    @staticmethod
+    def is_valid_dicom_date(date_str):
+        """Validate DICOM date format (YYYYMMDD)"""
+        if not date_str:
+            return False
+        if len(date_str) not in [8, 10]:  # YYYYMMDD or YYYY.MM.DD
+            return False
+        try:
+            from datetime import datetime
+            datetime.strptime(date_str.replace('.', ''), '%Y%m%d')
+            return True
+        except ValueError:
+            return False
+    
+    @staticmethod
+    def is_valid_uid(uid):
+        """Validate UID format"""
+        if not uid:
+            return False
+        # UID format: digits and dots, max 64 chars
+        if len(uid) > 64:
+            return False
+        if not all(c.isdigit() or c == '.' for c in uid):
+            return False
+        # Must not start or end with dot
+        if uid.startswith('.') or uid.endswith('.'):
+            return False
+        # Must not have consecutive dots
+        if '..' in uid:
+            return False
+        return True
+
+# Usage
+validator = IODValidator()
+errors, warnings = validator.validate_dataset(dataset, dataset.SOPClassUID)
+
+if errors:
+    print("Validation errors:")
+    for error in errors:
+        print(f"  ERROR: {error}")
+
+if warnings:
+    print("Validation warnings:")
+    for warning in warnings:
+        print(f"  WARNING: {warning}")
+```
+
+### File Format Validation
+
+```python
+def validate_dicom_file(file_path):
+    """Comprehensive DICOM file validation"""
+    issues = {
+        'errors': [],
+        'warnings': [],
+        'info': []
+    }
+    
+    try:
+        with open(file_path, 'rb') as f:
+            # 1. Check file size
+            f.seek(0, 2)  # Seek to end
+            file_size = f.tell()
+            f.seek(0)  # Back to start
+            
+            if file_size < 132:
+                issues['errors'].append("File too small to be valid DICOM")
+                return issues
+            
+            # 2. Check preamble and prefix
+            preamble = f.read(128)
+            prefix = f.read(4)
+            
+            if prefix != b'DICM':
+                issues['warnings'].append("Missing DICM prefix at byte 128")
+            
+            # 3. Parse file meta information
+            meta_info = {}
+            current_pos = f.tell()
+            
+            # File meta should be explicit VR little endian
+            while True:
+                if f.tell() >= file_size:
+                    break
+                
+                # Read tag
+                group = struct.unpack('<H', f.read(2))[0]
+                element = struct.unpack('<H', f.read(2))[0]
+                
+                # File meta is group 0002
+                if group != 0x0002:
+                    f.seek(current_pos)
+                    break
+                
+                # Read VR and length (explicit VR)
+                vr = f.read(2).decode('ascii')
+                
+                if vr in ['OB', 'OW', 'OF', 'SQ', 'UN', 'UT']:
+                    f.read(2)  # Reserved
+                    length = struct.unpack('<I', f.read(4))[0]
+                else:
+                    length = struct.unpack('<H', f.read(2))[0]
+                
+                # Read value
+                value = f.read(length)
+                
+                meta_info[(group, element)] = {
+                    'vr': vr,
+                    'value': value
+                }
+                
+                current_pos = f.tell()
+            
+            # 4. Validate required file meta elements
+            required_meta = [
+                (0x0002, 0x0000),  # File Meta Information Group Length
+                (0x0002, 0x0001),  # File Meta Information Version
+                (0x0002, 0x0002),  # Media Storage SOP Class UID
+                (0x0002, 0x0003),  # Media Storage SOP Instance UID
+                (0x0002, 0x0010),  # Transfer Syntax UID
+                (0x0002, 0x0012),  # Implementation Class UID
+            ]
+            
+            for tag in required_meta:
+                if tag not in meta_info:
+                    issues['errors'].append(f"Missing required file meta element: {tag[0]:04X},{tag[1]:04X}")
+            
+            # 5. Validate transfer syntax
+            if (0x0002, 0x0010) in meta_info:
+                transfer_syntax = meta_info[(0x0002, 0x0010)]['value'].decode('ascii').rstrip('\x00')
+                if transfer_syntax not in KNOWN_TRANSFER_SYNTAXES:
+                    issues['warnings'].append(f"Unknown transfer syntax: {transfer_syntax}")
+                else:
+                    issues['info'].append(f"Transfer Syntax: {transfer_syntax}")
+            
+            # 6. Check file meta group length
+            if (0x0002, 0x0000) in meta_info:
+                declared_length = struct.unpack('<I', meta_info[(0x0002, 0x0000)]['value'])[0]
+                actual_length = current_pos - 132 - 12  # Subtract preamble+prefix+grouplength tag
+                if declared_length != actual_length:
+                    issues['warnings'].append(
+                        f"File meta group length mismatch: declared={declared_length}, actual={actual_length}"
+                    )
+    
+    except Exception as e:
+        issues['errors'].append(f"Exception during validation: {e}")
+    
+    return issues
+
+KNOWN_TRANSFER_SYNTAXES = {
+    '1.2.840.10008.1.2': 'Implicit VR Little Endian',
+    '1.2.840.10008.1.2.1': 'Explicit VR Little Endian',
+    '1.2.840.10008.1.2.2': 'Explicit VR Big Endian',
+    '1.2.840.10008.1.2.4.50': 'JPEG Baseline',
+    '1.2.840.10008.1.2.4.70': 'JPEG Lossless',
+    '1.2.840.10008.1.2.4.90': 'JPEG 2000 Lossless',
+    '1.2.840.10008.1.2.5': 'RLE Lossless',
+    # Add more as needed
+}
+```
+
+### Conformance Statement Validation
+
+```python
+def check_conformance(dataset, conformance_statement):
+    """Validate dataset against conformance statement"""
+    issues = []
+    
+    # Check supported SOP Classes
+    sop_class = dataset.SOPClassUID
+    if sop_class not in conformance_statement['supported_sop_classes']:
+        issues.append(f"SOP Class {sop_class} not in conformance statement")
+    
+    # Check transfer syntaxes
+    transfer_syntax = dataset.file_meta.TransferSyntaxUID
+    if transfer_syntax not in conformance_statement['supported_transfer_syntaxes']:
+        issues.append(f"Transfer Syntax {transfer_syntax} not supported")
+    
+    # Check implementation class UID
+    impl_class = dataset.file_meta.ImplementationClassUID
+    if impl_class != conformance_statement['implementation_class_uid']:
+        issues.append(f"Implementation Class UID mismatch")
+    
+    return issues
+```
+
+---
+
+## DICOM with Cloud & Modern Architectures
+
+### Cloud-Native DICOM Storage
+
+#### S3-Based Archive
+
+```python
+import boto3
+import hashlib
+
+class S3DICOMArchive:
+    """Store DICOM files in AWS S3"""
+    
+    def __init__(self, bucket_name, region='us-east-1'):
+        self.s3 = boto3.client('s3', region_name=region)
+        self.bucket = bucket_name
+    
+    def store_instance(self, dataset, metadata):
+        """Store DICOM instance in S3"""
+        # Generate S3 key from UIDs
+        key = self.generate_s3_key(
+            metadata['patient_id'],
+            dataset.StudyInstanceUID,
+            dataset.SeriesInstanceUID,
+            dataset.SOPInstanceUID
+        )
+        
+        # Convert dataset to bytes
+        from io import BytesIO
+        buffer = BytesIO()
+        dataset.save_as(buffer, write_like_original=False)
+        buffer.seek(0)
+        
+        # Upload to S3 with metadata
+        self.s3.put_object(
+            Bucket=self.bucket,
+            Key=key,
+            Body=buffer.getvalue(),
+            Metadata={
+                'patient-id': metadata['patient_id'],
+                'study-uid': str(dataset.StudyInstanceUID),
+                'series-uid': str(dataset.SeriesInstanceUID),
+                'sop-uid': str(dataset.SOPInstanceUID),
+                'modality': str(dataset.Modality),
+            },
+            ContentType='application/dicom',
+            StorageClass='STANDARD_IA'  # Infrequent Access for cost savings
+        )
+        
+        return key
+    
+    def retrieve_instance(self, sop_instance_uid):
+        """Retrieve DICOM instance from S3"""
+        # Query metadata database for S3 key
+        key = self.lookup_s3_key(sop_instance_uid)
+        
+        # Download from S3
+        response = self.s3.get_object(Bucket=self.bucket, Key=key)
+        
+        # Parse DICOM
+        import pydicom
+        from io import BytesIO
+        dataset = pydicom.dcmread(BytesIO(response['Body'].read()))
+        
+        return dataset
+    
+    def generate_s3_key(self, patient_id, study_uid, series_uid, instance_uid):
+        """Generate hierarchical S3 key"""
+        # Hash for consistent distribution
+        patient_hash = hashlib.md5(patient_id.encode()).hexdigest()[:8]
+        study_hash = hashlib.md5(study_uid.encode()).hexdigest()[:8]
+        series_hash = hashlib.md5(series_uid.encode()).hexdigest()[:8]
+        instance_hash = hashlib.md5(instance_uid.encode()).hexdigest()[:8]
+        
+        # Hierarchical structure for better organization
+        key = f"dicom/{patient_hash[:2]}/{patient_hash}/{study_hash}/{series_hash}/{instance_hash}.dcm"
+        
+        return key
+    
+    def enable_lifecycle_policy(self):
+        """Configure S3 lifecycle for cost optimization"""
+        lifecycle_config = {
+            'Rules': [
+                {
+                    'Id': 'Archive old studies',
+                    'Status': 'Enabled',
+                    'Filter': {'Prefix': 'dicom/'},
+                    'Transitions': [
+                        {
+                            'Days': 90,
+                            'StorageClass': 'STANDARD_IA'
+                        },
+                        {
+                            'Days': 365,
+                            'StorageClass': 'GLACIER'
+                        },
+                        {
+                            'Days': 2555,  # 7 years
+                            'StorageClass': 'DEEP_ARCHIVE'
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        self.s3.put_bucket_lifecycle_configuration(
+            Bucket=self.bucket,
+            LifecycleConfiguration=lifecycle_config
+        )
+```
+
+### Containerized DICOM Services
+
+#### Docker Compose Configuration
+
+```yaml
+version: '3.8'
+
+services:
+  # DICOM Gateway (SCP)
+  dicom-gateway:
+    build: ./gateway
+    ports:
+      - "11112:11112"  # DICOM port
+    environment:
+      - AE_TITLE=GATEWAY
+      - MAX_ASSOCIATIONS=20
+      - PDU_SIZE=65536
+      - DATABASE_URL=postgresql://user:pass@postgres:5432/dicom
+      - REDIS_URL=redis://redis:6379
+      - S3_BUCKET=dicom-archive
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./logs:/app/logs
+    deploy:
+      replicas: 3  # Scale for high availability
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+  
+  # Query Service (DICOMweb QIDO-RS)
+  query-service:
+    build: ./query-service
+    ports:
+      - "8080:8080"
+    environment:
+      - DATABASE_URL=postgresql://user:pass@postgres:5432/dicom
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - postgres
+      - redis
+  
+  # Retrieve Service (DICOMweb WADO-RS)
+  retrieve-service:
+    build: ./retrieve-service
+    ports:
+      - "8081:8080"
+    environment:
+      - S3_BUCKET=dicom-archive
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+  
+  # PostgreSQL Database
+  postgres:
+    image: postgres:14
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=pass
+      - POSTGRES_DB=dicom
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+  
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+volumes:
+  postgres-data:
+  redis-data:
+```
+
+### Kubernetes Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dicom-gateway
+  labels:
+    app: dicom-gateway
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: dicom-gateway
+  template:
+    metadata:
+      labels:
+        app: dicom-gateway
+    spec:
+      containers:
+      - name: gateway
+        image: myorg/dicom-gateway:latest
+        ports:
+        - containerPort: 11112
+          name: dicom
+          protocol: TCP
+        env:
+        - name: AE_TITLE
+          value: "K8S_GATEWAY"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: dicom-secrets
+              key: database-url
+        - name: S3_BUCKET
+          value: "dicom-archive-prod"
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        livenessProbe:
+          tcpSocket:
+            port: 11112
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: 11112
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dicom-gateway-service
+spec:
+  type: LoadBalancer
+  selector:
+    app: dicom-gateway
+  ports:
+  - protocol: TCP
+    port: 11112
+    targetPort: 11112
+    name: dicom
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: dicom-gateway-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: dicom-gateway
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+```
+
+### Serverless DICOM Processing
+
+#### AWS Lambda for DICOM Processing
+
+```python
+import json
+import boto3
+import pydicom
+from io import BytesIO
+
+s3 = boto3.client('s3')
+dynamodb = boto3.resource('dynamodb')
+
+def lambda_handler(event, context):
+    """Process DICOM file uploaded to S3"""
+    
+    # Get S3 event details
+    bucket = event['Records'][0]['s3']['bucket']['name']
+    key = event['Records'][0]['s3']['object']['key']
+    
+    try:
+        # Download DICOM file
+        response = s3.get_object(Bucket=bucket, Key=key)
+        dicom_bytes = response['Body'].read()
+        
+        # Parse DICOM
+        dataset = pydicom.dcmread(BytesIO(dicom_bytes))
+        
+        # Extract metadata
+        metadata = extract_metadata(dataset)
+        
+        # Store in DynamoDB
+        table = dynamodb.Table('dicom-metadata')
+        table.put_item(Item=metadata)
+        
+        # Generate thumbnail
+        thumbnail = generate_thumbnail(dataset)
+        
+        # Upload thumbnail to S3
+        thumb_key = key.replace('.dcm', '_thumb.jpg')
+        s3.put_object(
+            Bucket=bucket,
+            Key=thumb_key,
+            Body=thumbnail,
+            ContentType='image/jpeg'
+        )
+        
+        return {
+            'statusCode': 200,
+            'body': json.dumps(f'Processed {key}')
+        }
+    
+    except Exception as e:
+        print(f"Error processing {key}: {e}")
+        return {
+            'statusCode': 500,
+            'body': json.dumps(f'Error: {str(e)}')
+        }
+
+def extract_metadata(dataset):
+    """Extract key metadata from DICOM"""
+    return {
+        'sop_instance_uid': str(dataset.SOPInstanceUID),
+        'study_instance_uid': str(dataset.StudyInstanceUID),
+        'series_instance_uid': str(dataset.SeriesInstanceUID),
+        'patient_id': str(dataset.PatientID),
+        'patient_name': str(dataset.PatientName),
+        'study_date': str(dataset.StudyDate),
+        'modality': str(dataset.Modality),
+        'rows': int(dataset.Rows),
+        'columns': int(dataset.Columns),
+    }
+
+def generate_thumbnail(dataset):
+    """Generate thumbnail from DICOM"""
+    from PIL import Image
+    
+    # Get pixel array
+    pixel_array = dataset.pixel_array
+    
+    # Convert to PIL Image
+    if len(pixel_array.shape) == 2:
+        img = Image.fromarray(pixel_array)
+    else:
+        img = Image.fromarray(pixel_array[:,:,0])
+    
+    # Create thumbnail
+    img.thumbnail((256, 256))
+    
+    # Convert to JPEG bytes
+    buffer = BytesIO()
+    img.save(buffer, format='JPEG')
+    return buffer.getvalue()
+```
+
+### Event-Driven Architecture
+
+```python
+import asyncio
+from dataclasses import dataclass
+from typing import Callable, List
+import json
+
+@dataclass
+class DICOMEvent:
+    """DICOM system event"""
+    event_type: str  # 'STORE', 'QUERY', 'RETRIEVE'
+    timestamp: str
+    data: dict
+
+class EventBus:
+    """Pub/Sub event bus for DICOM events"""
+    
+    def __init__(self, redis_url='redis://localhost'):
+        import redis
+        self.redis = redis.from_url(redis_url)
+        self.pubsub = self.redis.pubsub()
+        self.handlers = {}
+    
+    def publish(self, event: DICOMEvent):
+        """Publish event to bus"""
+        message = json.dumps({
+            'type': event.event_type,
+            'timestamp': event.timestamp,
+            'data': event.data
+        })
+        self.redis.publish(f'dicom.{event.event_type}', message)
+    
+    def subscribe(self, event_type: str, handler: Callable):
+        """Subscribe to event type"""
+        channel = f'dicom.{event_type}'
+        if channel not in self.handlers:
+            self.handlers[channel] = []
+            self.pubsub.subscribe(channel)
+        self.handlers[channel].append(handler)
+    
+    async def start(self):
+        """Start event loop"""
+        for message in self.pubsub.listen():
+            if message['type'] == 'message':
+                channel = message['channel'].decode('utf-8')
+                data = json.loads(message['data'])
+                
+                # Call all handlers for this channel
+                if channel in self.handlers:
+                    for handler in self.handlers[channel]:
+                        try:
+                            await handler(data)
+                        except Exception as e:
+                            print(f"Handler error: {e}")
+
+# Usage Example
+event_bus = EventBus()
+
+# Subscribe to store events
+async def on_store(data):
+    """Handler for store events"""
+    print(f"Image stored: {data['sop_instance_uid']}")
+    # Trigger downstream processing
+    await process_image(data)
+
+event_bus.subscribe('STORE', on_store)
+
+# Publish event when image is stored
+event_bus.publish(DICOMEvent(
+    event_type='STORE',
+    timestamp='2026-02-08T10:00:00Z',
+    data={
+        'sop_instance_uid': '1.2.3.4.5',
+        'study_uid': '1.2.3.4',
+        'patient_id': 'P12345'
+    }
+))
+```
+
+### Microservices Architecture
+
+```python
+# Ingest Microservice
+from fastapi import FastAPI, UploadFile, File
+import uvicorn
+
+app = FastAPI()
+
+@app.post("/dicom/upload")
+async def upload_dicom(file: UploadFile = File(...)):
+    """Accept DICOM file upload"""
+    content = await file.read()
+    
+    # Parse DICOM
+    dataset = pydicom.dcmread(BytesIO(content))
+    
+    # Store in S3
+    s3_key = archive.store_instance(dataset, extract_metadata(dataset))
+    
+    # Update metadata database
+    db.insert_instance(dataset, s3_key)
+    
+    # Publish event
+    event_bus.publish(DICOMEvent(
+        event_type='STORE',
+        timestamp=datetime.utcnow().isoformat(),
+        data={'sop_uid': str(dataset.SOPInstanceUID)}
+    ))
+    
+    return {"status": "success", "sop_uid": str(dataset.SOPInstanceUID)}
+
+# Query Microservice
+@app.get("/dicom/studies")
+async def query_studies(
+    patient_id: str = None,
+    study_date: str = None,
+    modality: str = None
+):
+    """Query for studies"""
+    results = db.query_studies(
+        patient_id=patient_id,
+        study_date=study_date,
+        modality=modality
+    )
+    
+    return {"results": results}
+
+# Retrieve Microservice
+@app.get("/dicom/instances/{sop_uid}")
+async def retrieve_instance(sop_uid: str):
+    """Retrieve DICOM instance"""
+    # Get from cache first
+    cached = cache.get(f"instance:{sop_uid}")
+    if cached:
+        return Response(content=cached, media_type="application/dicom")
+    
+    # Retrieve from S3
+    dataset = archive.retrieve_instance(sop_uid)
+    
+    # Serialize to bytes
+    buffer = BytesIO()
+    dataset.save_as(buffer)
+    content = buffer.getvalue()
+    
+    # Cache for future requests
+    cache.put(f"instance:{sop_uid}", content, ttl=3600)
+    
+    return Response(content=content, media_type="application/dicom")
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+```
+
+### Monitoring & Observability
+
+```python
+from prometheus_client import Counter, Histogram, Gauge, start_http_server
+import logging
+import time
+
+# Prometheus metrics
+dicom_operations = Counter(
+    'dicom_operations_total',
+    'Total DICOM operations',
+    ['operation', 'status']
+)
+
+dicom_duration = Histogram(
+    'dicom_operation_duration_seconds',
+    'DICOM operation duration',
+    ['operation']
+)
+
+active_connections = Gauge(
+    'dicom_active_connections',
+    'Active DICOM connections'
+)
+
+storage_size = Gauge(
+    'dicom_storage_bytes',
+    'Total storage used'
+)
+
+# Structured logging
+import structlog
+
+logger = structlog.get_logger()
+
+def instrumented_operation(operation_name):
+    """Decorator for instrumented operations"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            start_time = time.time()
+            active_connections.inc()
+            
+            try:
+                result = func(*args, **kwargs)
+                dicom_operations.labels(
+                    operation=operation_name,
+                    status='success'
+                ).inc()
+                
+                logger.info(
+                    "operation_complete",
+                    operation=operation_name,
+                    duration=time.time() - start_time,
+                    status="success"
+                )
+                
+                return result
+            
+            except Exception as e:
+                dicom_operations.labels(
+                    operation=operation_name,
+                    status='error'
+                ).inc()
+                
+                logger.error(
+                    "operation_failed",
+                    operation=operation_name,
+                    duration=time.time() - start_time,
+                    error=str(e),
+                    exc_info=True
+                )
+                
+                raise
+            
+            finally:
+                dicom_duration.labels(operation=operation_name).observe(
+                    time.time() - start_time
+                )
+                active_connections.dec()
+        
+        return wrapper
+    return decorator
+
+# Usage
+@instrumented_operation('c_store')
+def handle_c_store(event):
+    """Instrumented C-STORE handler"""
+    dataset = event.dataset
+    # ... store logic ...
+    return 0x0000
+
+# Start Prometheus metrics server
+start_http_server(9090)
+```
+
+---
+
 ## Best Practices
 
 ### File Handling
