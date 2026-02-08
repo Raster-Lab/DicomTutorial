@@ -700,6 +700,589 @@ Transfer Syntax: Explicit VR Little Endian (1.2.840.10008.1.2.1)
 
 ---
 
+## Advanced DICOM Networking & PDU Protocol
+
+### Protocol Data Units (PDUs)
+
+DICOM networking uses Protocol Data Units (PDUs) for message exchange over TCP/IP. Understanding PDU structure is essential for implementing DICOM network services.
+
+#### PDU Types
+
+| PDU Type | Value | Purpose |
+|----------|-------|---------|
+| A-ASSOCIATE-RQ | 0x01 | Association request from SCU |
+| A-ASSOCIATE-AC | 0x02 | Association acceptance from SCP |
+| A-ASSOCIATE-RJ | 0x03 | Association rejection from SCP |
+| P-DATA-TF | 0x04 | Transfer of DIMSE messages |
+| A-RELEASE-RQ | 0x05 | Release request |
+| A-RELEASE-RP | 0x06 | Release response |
+| A-ABORT | 0x07 | Abort association |
+
+### PDU Structure Details
+
+#### A-ASSOCIATE-RQ PDU Structure
+
+```
++-------------------+
+| PDU-type (0x01)   | 1 byte
++-------------------+
+| Reserved          | 1 byte
++-------------------+
+| PDU-length        | 4 bytes (big-endian)
++-------------------+
+| Protocol-version  | 2 bytes
++-------------------+
+| Reserved          | 2 bytes
++-------------------+
+| Called-AE-title   | 16 bytes (space-padded)
++-------------------+
+| Calling-AE-title  | 16 bytes (space-padded)
++-------------------+
+| Reserved          | 32 bytes
++-------------------+
+| Variable Items:   |
+|  - Application    |
+|    Context        |
+|  - Presentation   |
+|    Contexts       |
+|  - User Info      |
++-------------------+
+```
+
+**Application Context Item** (0x10):
+- Identifies DICOM application layer protocol
+- Standard value: `1.2.840.10008.3.1.1.1`
+
+**Presentation Context Item** (0x20):
+- Contains:
+  - Presentation Context ID (odd number, 1-255)
+  - Abstract Syntax (SOP Class UID)
+  - Transfer Syntax list (one or more)
+
+**User Information Item** (0x50):
+- Maximum Length Sub-item (0x51): Maximum PDU size
+- Implementation Class UID (0x52): Implementation identifier
+- Implementation Version Name (0x55): Software version
+- SCP/SCU Role Selection (0x54): Negotiates roles
+- Extended Negotiation (0x56): Extended features
+
+#### P-DATA-TF PDU Structure
+
+```
++-------------------+
+| PDU-type (0x04)   | 1 byte
++-------------------+
+| Reserved          | 1 byte
++-------------------+
+| PDU-length        | 4 bytes
++-------------------+
+| Presentation-data-|
+| value Items       | Variable length
++-------------------+
+```
+
+Each Presentation-data-value item contains:
+- Presentation Context ID (1 byte)
+- DIMSE message fragments with:
+  - Message Control Header (bit 0: last fragment, bit 1: command/data)
+  - DIMSE command or data fragment
+
+### Association Negotiation Deep Dive
+
+#### Step-by-Step Association Process
+
+**1. SCU Prepares Association Request**
+```
+A-ASSOCIATE-RQ includes:
+- Called AE Title: "PACS_SERVER"
+- Calling AE Title: "WORKSTATION1"
+- Application Context: 1.2.840.10008.3.1.1.1
+- Presentation Contexts (example):
+  
+  PC ID 1:
+    Abstract Syntax: CT Image Storage (1.2.840.10008.5.1.4.1.1.2)
+    Transfer Syntaxes:
+      - Explicit VR Little Endian (1.2.840.10008.1.2.1)
+      - Implicit VR Little Endian (1.2.840.10008.1.2)
+      - JPEG Lossless (1.2.840.10008.1.2.4.70)
+  
+  PC ID 3:
+    Abstract Syntax: MR Image Storage (1.2.840.10008.5.1.4.1.1.4)
+    Transfer Syntaxes:
+      - Explicit VR Little Endian (1.2.840.10008.1.2.1)
+  
+- User Information:
+  Max PDU Length: 16384 bytes
+  Implementation Class UID: 1.2.840.xxxxx
+  Implementation Version: MyDICOM_v1.0
+```
+
+**2. SCP Evaluates Request**
+- Validates Called AE Title matches configured AE
+- Checks each Presentation Context:
+  - Accepts or rejects Abstract Syntax
+  - Selects ONE Transfer Syntax from offered list
+  - Assigns acceptance/rejection code
+
+**3. SCP Sends Association Response**
+```
+A-ASSOCIATE-AC includes:
+- Presentation Context Results:
+  
+  PC ID 1: Accepted (0x00)
+    Selected Transfer Syntax: JPEG Lossless (1.2.840.10008.1.2.4.70)
+  
+  PC ID 3: Accepted (0x00)
+    Selected Transfer Syntax: Explicit VR Little Endian (1.2.840.10008.1.2.1)
+  
+- User Information:
+  Max PDU Length: 16384 bytes (confirmed or smaller)
+  Implementation Class UID: 1.2.840.yyyyy
+  Implementation Version: PACSServer_v2.5
+```
+
+#### Presentation Context Negotiation Result Codes
+
+| Code | Meaning |
+|------|---------|
+| 0x00 | Acceptance |
+| 0x01 | User rejection |
+| 0x02 | No reason given (provider rejection) |
+| 0x03 | Abstract syntax not supported |
+| 0x04 | Transfer syntaxes not supported |
+
+### Maximum PDU Size Negotiation
+
+**Purpose**: Limits memory usage and prevents buffer overflows
+
+**Negotiation**:
+1. SCU proposes maximum PDU size (e.g., 16384, 32768, 65536 bytes)
+2. SCP accepts or proposes smaller value
+3. Both sides use the MINIMUM of proposed values
+
+**Common Values**:
+- **16384** (16 KB): Conservative default
+- **32768** (32 KB): Common for moderate loads
+- **65536** (64 KB): High performance
+- **131072** (128 KB): Maximum practical limit
+
+**Impact on Performance**:
+- Larger PDU = fewer network round-trips
+- Larger PDU = more memory usage
+- Optimal size depends on network latency and bandwidth
+
+**Calculation Example**:
+```
+Image size: 512 x 512 x 2 bytes = 524,288 bytes
+PDU size: 16,384 bytes
+Number of P-DATA PDUs needed: 524,288 / 16,384 = 32 PDUs
+```
+
+### DICOM Network State Machine
+
+```
+        +----------+
+        |  Idle    |<--------+
+        +----------+         |
+             |               |
+             | (Open TCP)    |
+             v               |
+        +----------+         |
+        | Awaiting |         |
+        | A-ASSOC  |         |
+        +----------+         |
+             |               |
+   +---------+---------+     |
+   |                   |     |
+   v (RQ)           v (AC)   |
++----------+    +----------+ |
+| Negotia- |    |  Assoc   | |
+| tion     |    |  Estab-  | |
++----------+    | lished   | |
+   |            +----------+ |
+   | (AC/RJ)         |       |
+   |                 |       |
+   +-------+---------+       |
+           |                 |
+           v                 |
+      +----------+           |
+      | Data     |           |
+      | Transfer |           |
+      +----------+           |
+           |                 |
+           | (A-RELEASE)     |
+           v                 |
+      +----------+           |
+      | Release  |-----------+
+      | Pending  |
+      +----------+
+
+States:
+1. Idle: No connection
+2. Awaiting A-ASSOCIATE: TCP connected, waiting for association
+3. Negotiation: Processing association request
+4. Association Established: Ready for DIMSE operations
+5. Data Transfer: Active DIMSE commands
+6. Release Pending: Graceful shutdown in progress
+```
+
+### Handling Network Errors
+
+#### Timeout Strategies
+
+**Connection Timeout**:
+```python
+# Example timeout configuration
+CONNECT_TIMEOUT = 30  # seconds to establish TCP connection
+ASSOC_TIMEOUT = 30    # seconds to complete association negotiation
+DIMSE_TIMEOUT = 60    # seconds for DIMSE command response
+IDLE_TIMEOUT = 300    # seconds of inactivity before auto-release
+```
+
+**Timeout Handling Pattern**:
+```python
+import socket
+import time
+
+def connect_with_timeout(host, port, timeout=30):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((host, port))
+        return sock
+    except socket.timeout:
+        raise ConnectionError(f"Connection timeout after {timeout}s")
+    except Exception as e:
+        raise ConnectionError(f"Connection failed: {e}")
+
+def send_with_retry(sock, data, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            sock.sendall(data)
+            return True
+        except socket.error as e:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(2 ** attempt)  # Exponential backoff
+    return False
+```
+
+#### Association Rejection Handling
+
+**Rejection Reasons**:
+1. **Called AE Title Not Recognized**: Wrong destination AE
+2. **Calling AE Title Not Recognized**: Source not authorized
+3. **No Presentation Contexts Accepted**: No compatible SOP Classes
+4. **Temporary Congestion**: SCP too busy
+
+**Handling Strategy**:
+```python
+def handle_association_rejection(rejection_pdu):
+    result = rejection_pdu.result
+    source = rejection_pdu.source
+    reason = rejection_pdu.reason
+    
+    if source == 1:  # DICOM UL service-user
+        if reason == 1:
+            raise ValueError("Called AE Title not recognized")
+        elif reason == 2:
+            raise ValueError("Calling AE Title not recognized")
+        elif reason == 3:
+            raise PermissionError("Calling AE Title not authorized")
+    elif source == 2:  # DICOM UL service-provider (ACSE)
+        if reason == 1:
+            raise ConnectionError("No reason given")
+        elif reason == 2:
+            raise NotImplementedError("Application context name not supported")
+    elif source == 3:  # DICOM UL service-provider (Presentation)
+        if reason == 1:
+            raise ConnectionError("Temporary congestion")
+        elif reason == 2:
+            raise ConnectionError("Local limit exceeded")
+```
+
+#### Abort Handling
+
+**Abort Sources**:
+- **DICOM UL service-user**: Application layer abort
+- **DICOM UL service-provider**: Protocol error
+
+**Common Abort Reasons**:
+1. **Invalid PDU**: Malformed PDU received
+2. **Unexpected PDU**: PDU received in wrong state
+3. **Unrecognized PDU**: Unknown PDU type
+4. **Application Timeout**: Application took too long
+5. **Protocol Error**: Violation of DICOM Upper Layer Protocol
+
+**Abort Recovery**:
+```python
+def handle_abort(abort_pdu):
+    source = abort_pdu.source
+    reason = abort_pdu.reason
+    
+    # Log the abort
+    logger.error(f"Association aborted - Source: {source}, Reason: {reason}")
+    
+    # Clean up resources
+    close_tcp_connection()
+    
+    # Decide on retry strategy
+    if reason in [0x00, 0x02]:  # Timeout or application error
+        # May be transient, retry with backoff
+        return "RETRY"
+    else:  # Protocol errors
+        # Likely configuration issue, don't retry immediately
+        return "FAIL"
+```
+
+### Asynchronous Operations Window
+
+**Purpose**: Allow multiple outstanding DIMSE operations on single association
+
+**Negotiation**:
+```
+User Information Item includes:
+  Asynchronous Operations Window Sub-item:
+    - Max operations invoked (by SCU)
+    - Max operations performed (by SCP)
+```
+
+**Use Cases**:
+- Parallel image retrieval (multiple C-STORE operations)
+- Concurrent queries
+- Improved throughput for high-latency connections
+
+**Example**:
+```python
+# Request async window during association
+assoc_rq.user_info.async_ops_window = (5, 1)  # 5 invoked, 1 performed
+
+# After association accepted, check negotiated values
+if assoc_ac.user_info.async_ops_window:
+    max_invoked, max_performed = assoc_ac.user_info.async_ops_window
+    # Can now send up to max_invoked operations before waiting
+```
+
+### PDU Fragmentation
+
+**When P-DATA PDUs are Fragmented**:
+- DIMSE message exceeds maximum PDU size
+- Large pixel data needs multiple PDUs
+
+**Fragment Indicators**:
+- **Message Control Header byte**:
+  - Bit 0: `0` = more fragments, `1` = last fragment
+  - Bit 1: `0` = command set, `1` = data set
+
+**Reassembly Algorithm**:
+```python
+def reassemble_pdus(pdu_list):
+    """Reassemble fragmented P-DATA PDUs into complete DIMSE message"""
+    command_fragments = []
+    data_fragments = []
+    
+    for pdu in pdu_list:
+        for pv_item in pdu.presentation_data_values:
+            control_header = pv_item.message_control_header
+            is_last = (control_header & 0x02) != 0
+            is_data = (control_header & 0x01) != 0
+            
+            if is_data:
+                data_fragments.append(pv_item.data)
+            else:
+                command_fragments.append(pv_item.data)
+            
+            if is_last:
+                # Complete message received
+                break
+    
+    command = b''.join(command_fragments)
+    data = b''.join(data_fragments)
+    
+    return decode_dimse_command(command), data
+```
+
+### Network Performance Optimization
+
+#### Connection Pooling
+
+**Strategy**: Maintain pool of persistent associations
+
+```python
+class AssociationPool:
+    def __init__(self, host, port, ae_title, max_connections=5):
+        self.host = host
+        self.port = port
+        self.ae_title = ae_title
+        self.max_connections = max_connections
+        self.pool = []
+        self.in_use = set()
+    
+    def acquire(self):
+        """Get association from pool or create new one"""
+        # Try to reuse idle association
+        for assoc in self.pool:
+            if assoc not in self.in_use:
+                self.in_use.add(assoc)
+                return assoc
+        
+        # Create new if under limit
+        if len(self.pool) < self.max_connections:
+            assoc = self.create_association()
+            self.pool.append(assoc)
+            self.in_use.add(assoc)
+            return assoc
+        
+        # Wait for available association
+        return self.wait_for_available()
+    
+    def release(self, assoc):
+        """Return association to pool"""
+        self.in_use.remove(assoc)
+```
+
+#### TCP Options for DICOM
+
+```python
+import socket
+
+def optimize_socket(sock):
+    """Optimize TCP socket for DICOM traffic"""
+    # Disable Nagle's algorithm for lower latency
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    
+    # Increase buffer sizes for large images
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 262144)  # 256 KB
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 262144)  # 256 KB
+    
+    # Enable keep-alive to detect dead connections
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    
+    # Set keep-alive parameters (Linux-specific)
+    if hasattr(socket, 'TCP_KEEPIDLE'):
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)   # 60s before first keep-alive
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)  # 10s between keep-alives
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)     # 5 failed keep-alives
+```
+
+### Troubleshooting Network Issues
+
+#### Diagnostic Steps
+
+**1. Test Basic Connectivity**
+```bash
+# Test TCP connectivity
+telnet pacs-server.hospital.com 11112
+
+# Or with netcat
+nc -zv pacs-server.hospital.com 11112
+
+# Test DICOM echo
+echoscu -v pacs-server.hospital.com 11112 -aet MYSCU -aec PACSSCP
+```
+
+**2. Capture Network Traffic**
+```bash
+# Capture DICOM traffic with tcpdump
+tcpdump -i eth0 -w dicom_capture.pcap 'port 11112'
+
+# Analyze with Wireshark (DICOM dissector)
+wireshark dicom_capture.pcap
+```
+
+**3. Enable Verbose Logging**
+```python
+# Enable detailed logging in pynetdicom
+import logging
+logging.basicConfig(level=logging.DEBUG)
+
+# For DCMTK, use debug flags
+# dcmnet: +v for verbose, +d for debug
+storescu +v +d pacs-server 11112 image.dcm
+```
+
+#### Common Network Problems
+
+**Problem 1: Association Timeout**
+```
+Symptoms: Connection hangs during association
+Causes:
+  - Firewall blocking return traffic
+  - SCP not listening on specified port
+  - Wrong AE Title configuration
+  - Network congestion
+
+Solutions:
+  1. Verify SCP is running: netstat -an | grep 11112
+  2. Check firewall rules
+  3. Verify AE Title configuration
+  4. Test with echoscu
+```
+
+**Problem 2: Association Rejected**
+```
+Symptoms: A-ASSOCIATE-RJ received
+Causes:
+  - Called AE Title mismatch
+  - Calling AE Title not authorized
+  - No compatible presentation contexts
+  
+Solutions:
+  1. Verify AE Titles: check SCU and SCP configs
+  2. Check SCP authorization list
+  3. Review presentation contexts in logs
+  4. Ensure matching SOP Classes
+```
+
+**Problem 3: Data Transfer Fails**
+```
+Symptoms: Association succeeds but C-STORE fails
+Causes:
+  - Insufficient disk space on SCP
+  - Permissions issues
+  - Unsupported transfer syntax
+  - Corrupted pixel data
+  
+Solutions:
+  1. Check SCP disk space
+  2. Verify file permissions
+  3. Review accepted transfer syntaxes
+  4. Validate DICOM file with dciodvfy
+```
+
+**Problem 4: Slow Transfer Speed**
+```
+Symptoms: Images transfer very slowly
+Causes:
+  - Small PDU size
+  - Network latency
+  - Nagle's algorithm enabled
+  - Sequential operations (no async)
+  
+Solutions:
+  1. Increase PDU size to 64KB
+  2. Enable TCP_NODELAY
+  3. Use asynchronous operations window
+  4. Check network bandwidth
+```
+
+#### Network Debugging Checklist
+
+- [ ] TCP connection establishes successfully
+- [ ] AE Titles match on both sides
+- [ ] Presentation contexts are compatible
+- [ ] Transfer syntaxes are supported
+- [ ] Maximum PDU size is reasonable
+- [ ] Timeouts are configured appropriately
+- [ ] Firewall allows bi-directional traffic
+- [ ] No intermediate proxies interfering
+- [ ] Sufficient disk space on SCP
+- [ ] File permissions correct
+- [ ] DICOM files are valid
+- [ ] Logging enabled for debugging
+
+---
+
 ## DICOM Services (DIMSE)
 
 ### DIMSE Overview
@@ -768,6 +1351,443 @@ SCU                                    SCP
  │         (Success - No More Matches) │
  │                                      │
 ```
+
+---
+
+## DICOM Error Handling & Status Codes
+
+### DIMSE Status Codes Overview
+
+Every DIMSE operation returns a status code indicating success, failure, or pending state. Understanding these codes is critical for robust error handling.
+
+### Status Code Categories
+
+| Category | Range | Meaning |
+|----------|-------|---------|
+| **Success** | 0x0000 | Operation completed successfully |
+| **Pending** | 0xFF00, 0xFF01 | Operation in progress, more responses coming |
+| **Cancel** | 0xFE00 | Operation canceled by user |
+| **Warning** | 0x0001, 0x0107, 0xB000-0xBFFF | Operation completed with warnings |
+| **Failure** | 0x0102-0x0122, 0xA700-0xA9FF, 0xC000-0xCFFF | Operation failed |
+
+### Detailed Status Codes by Service
+
+#### C-STORE Status Codes
+
+| Status | Code | Meaning | Action |
+|--------|------|---------|--------|
+| Success | 0x0000 | Storage successful | None |
+| Warning | 0xB000 | Coercion of data elements | Log warning, data was modified |
+| Warning | 0xB006 | Elements discarded | Log warning, some elements not stored |
+| Warning | 0xB007 | Data set does not match SOP Class | Log warning, possible validation issue |
+| Failure | 0x0117 | Invalid SOP Instance | Reject file, log error |
+| Failure | 0x0118 | No such SOP Class | SOP Class not supported |
+| Failure | 0x0119 | Class-Instance conflict | Instance UID doesn't match SOP Class |
+| Failure | 0x0122 | SOP Class not supported | Reject transfer |
+| Failure | 0x0124 | Not authorized | Permission denied |
+| Failure | 0x0210 | Duplicate invocation | Request already in progress |
+| Failure | 0x0211 | Unrecognized operation | Invalid operation type |
+| Failure | 0x0212 | Mistyped argument | Invalid parameter |
+| Failure | 0xA700-0xA7FF | Out of resources | Insufficient storage/memory |
+| Failure | 0xA900-0xA9FF | Data set does not match SOP Class | Invalid attributes |
+| Failure | 0xC000-0xCFFF | Cannot understand | Processing error |
+
+**C-STORE Error Handling Example**:
+```python
+def handle_store_status(status_code, status_dataset):
+    """Handle C-STORE response status"""
+    if status_code == 0x0000:
+        return "SUCCESS"
+    
+    elif status_code == 0xB000:
+        # Warning: Coercion occurred
+        logger.warning("SCP coerced data elements during storage")
+        return "SUCCESS_WITH_WARNING"
+    
+    elif status_code == 0xB007:
+        # Warning: Data set doesn't match SOP Class
+        logger.warning("Data set mismatch - image stored but may have issues")
+        return "SUCCESS_WITH_WARNING"
+    
+    elif status_code == 0x0117:
+        raise ValueError("Invalid SOP Instance UID")
+    
+    elif status_code == 0x0122:
+        raise NotImplementedError("SOP Class not supported by SCP")
+    
+    elif status_code == 0x0124:
+        raise PermissionError("Storage not authorized")
+    
+    elif 0xA700 <= status_code <= 0xA7FF:
+        raise IOError("SCP out of resources (disk space/memory)")
+    
+    elif 0xC000 <= status_code <= 0xCFFF:
+        error_comment = status_dataset.get('ErrorComment', 'Unknown error')
+        raise RuntimeError(f"Storage failed: {error_comment}")
+    
+    else:
+        raise RuntimeError(f"Unknown status code: 0x{status_code:04X}")
+```
+
+#### C-FIND Status Codes
+
+| Status | Code | Meaning | Action |
+|--------|------|---------|--------|
+| Pending | 0xFF00 | Matches are continuing | Wait for more responses |
+| Pending | 0xFF01 | Matches continuing, warning | Log warning, continue |
+| Success | 0x0000 | Matching complete | Process results |
+| Cancel | 0xFE00 | Matching terminated | Handle cancellation |
+| Failure | 0x0122 | SOP Class not supported | Query not supported |
+| Failure | 0xA700 | Out of resources | SCP cannot process query |
+| Failure | 0xA900 | Identifier does not match SOP Class | Invalid query keys |
+| Failure | 0xC000-0xCFFF | Unable to process | Query failed |
+
+**C-FIND Handling Pattern**:
+```python
+def perform_find(association, query_dataset):
+    """Execute C-FIND and collect results"""
+    results = []
+    errors = []
+    
+    # Send C-FIND request
+    responses = association.send_c_find(query_dataset)
+    
+    for status, identifier in responses:
+        if status.Status == 0xFF00 or status.Status == 0xFF01:
+            # Pending - add result
+            if identifier:
+                results.append(identifier)
+            if status.Status == 0xFF01:
+                # Pending with warning
+                logger.warning(f"Query warning: {status.ErrorComment}")
+        
+        elif status.Status == 0x0000:
+            # Success - query complete
+            logger.info(f"Query complete. Found {len(results)} matches")
+            break
+        
+        elif status.Status == 0xFE00:
+            # Canceled
+            logger.info("Query was canceled")
+            break
+        
+        elif status.Status == 0x0122:
+            raise NotImplementedError("Query/Retrieve SOP Class not supported")
+        
+        elif status.Status == 0xA900:
+            raise ValueError(f"Invalid query keys: {status.ErrorComment}")
+        
+        elif status.Status >= 0xC000:
+            error_msg = status.ErrorComment or "Unknown error"
+            raise RuntimeError(f"Query failed: {error_msg}")
+    
+    return results
+```
+
+#### C-GET Status Codes
+
+| Status | Code | Meaning | Action |
+|--------|------|---------|--------|
+| Pending | 0xFF00 | Sub-operations continuing | Monitor progress |
+| Success | 0x0000 | All sub-operations complete | Verify all images received |
+| Cancel | 0xFE00 | Retrieval canceled | Handle partial transfer |
+| Warning | 0xB000 | One or more sub-operations failed | Check which images failed |
+| Failure | 0x0122 | SOP Class not supported | Cannot retrieve |
+| Failure | 0xA701 | Out of resources (performing) | SCP cannot send images |
+| Failure | 0xA702 | Out of resources (unable to calculate) | Cannot determine matches |
+| Failure | 0xA900 | Identifier does not match SOP Class | Invalid retrieve keys |
+| Failure | 0xC000-0xCFFF | Unable to perform sub-operations | Retrieval failed |
+
+**C-GET Progress Tracking**:
+```python
+def perform_get_with_progress(association, query_dataset):
+    """Execute C-GET and track progress"""
+    received_images = []
+    failed_images = []
+    
+    # Handler for received C-STORE (sub-operation)
+    def handle_store(event):
+        """Called when SCP sends image via C-STORE"""
+        try:
+            dataset = event.dataset
+            received_images.append(dataset)
+            return 0x0000  # Success
+        except Exception as e:
+            logger.error(f"Failed to receive image: {e}")
+            failed_images.append(event)
+            return 0xC000  # Failure
+    
+    # Bind C-STORE handler
+    association.bind_c_store(handle_store)
+    
+    # Send C-GET request
+    responses = association.send_c_get(query_dataset)
+    
+    for status, identifier in responses:
+        if status.Status == 0xFF00:
+            # Pending - show progress
+            remaining = status.NumberOfRemainingSuboperations or 0
+            completed = status.NumberOfCompletedSuboperations or 0
+            failed = status.NumberOfFailedSuboperations or 0
+            warning = status.NumberOfWarningSuboperations or 0
+            
+            total = remaining + completed + failed + warning
+            progress = (completed + failed + warning) / total * 100 if total > 0 else 0
+            
+            logger.info(f"Progress: {progress:.1f}% ({completed}/{total} complete, {failed} failed)")
+        
+        elif status.Status == 0x0000:
+            # Success
+            logger.info(f"Retrieval complete. Received {len(received_images)} images")
+            break
+        
+        elif status.Status == 0xB000:
+            # Warning - some images failed
+            logger.warning(f"Retrieval completed with {len(failed_images)} failures")
+            break
+        
+        elif status.Status >= 0xC000:
+            error = status.ErrorComment or "Unknown error"
+            raise RuntimeError(f"Retrieval failed: {error}")
+    
+    return received_images, failed_images
+```
+
+#### C-MOVE Status Codes
+
+Similar to C-GET but includes destination routing:
+
+| Status | Code | Meaning | Action |
+|--------|------|---------|--------|
+| Pending | 0xFF00 | Sub-operations continuing | Monitor progress |
+| Success | 0x0000 | All sub-operations complete | Verify destination received |
+| Cancel | 0xFE00 | Move canceled | Handle partial transfer |
+| Warning | 0xB000 | One or more sub-operations failed | Check destination |
+| Failure | 0xA801 | Move destination unknown | Invalid AE Title |
+| Failure | 0xA900 | Identifier does not match SOP Class | Invalid move keys |
+
+#### C-ECHO Status Codes
+
+| Status | Code | Meaning |
+|--------|------|---------|
+| Success | 0x0000 | Echo successful - connection verified |
+| Failure | 0x0122 | Verification SOP Class not supported |
+
+#### N-CREATE, N-SET, N-GET, N-ACTION Status Codes
+
+| Status | Code | Meaning |
+|--------|------|---------|
+| Success | 0x0000 | Operation successful |
+| Warning | 0x0001 | Requested attribute list not available |
+| Warning | 0x0107 | Attribute list error |
+| Failure | 0x0110 | Processing failure |
+| Failure | 0x0112 | No such SOP Instance |
+| Failure | 0x0117 | Invalid object Instance |
+| Failure | 0x0118 | No such SOP Class |
+| Failure | 0x0119 | Class-Instance conflict |
+| Failure | 0x0123 | No such action |
+| Failure | 0x0124 | Not authorized |
+
+### Error Comment and Offending Element
+
+When errors occur, SCPs may include additional information:
+
+**Error Comment** (0000,0902):
+- Human-readable error description
+- Use for logging and user feedback
+
+**Offending Element** (0000,0901):
+- Tag of element that caused the error
+- Helps identify problematic attributes
+
+```python
+def extract_error_details(status_dataset):
+    """Extract detailed error information from status"""
+    error_info = {
+        'status': status_dataset.Status,
+        'comment': None,
+        'offending_elements': []
+    }
+    
+    # Get error comment
+    if hasattr(status_dataset, 'ErrorComment'):
+        error_info['comment'] = status_dataset.ErrorComment
+    
+    # Get offending elements
+    if hasattr(status_dataset, 'OffendingElement'):
+        offending = status_dataset.OffendingElement
+        if isinstance(offending, list):
+            error_info['offending_elements'] = [
+                f"({tag.group:04X},{tag.element:04X})" 
+                for tag in offending
+            ]
+        else:
+            tag = offending
+            error_info['offending_elements'] = [
+                f"({tag.group:04X},{tag.element:04X})"
+            ]
+    
+    return error_info
+```
+
+### Retry Strategies
+
+#### Transient vs Permanent Failures
+
+**Transient Failures** (retry recommended):
+- 0xA700: Out of resources
+- 0x0210: Duplicate invocation
+- Network timeouts
+- Temporary connection failures
+
+**Permanent Failures** (don't retry):
+- 0x0122: SOP Class not supported
+- 0x0124: Not authorized
+- 0x0117: Invalid SOP Instance
+- 0xA900: Invalid identifier
+
+#### Exponential Backoff Pattern
+
+```python
+import time
+import random
+
+def retry_with_backoff(operation, max_retries=3, base_delay=1.0):
+    """Retry operation with exponential backoff"""
+    for attempt in range(max_retries):
+        try:
+            return operation()
+        except TransientError as e:
+            if attempt == max_retries - 1:
+                raise
+            
+            # Calculate delay with jitter
+            delay = base_delay * (2 ** attempt)
+            jitter = random.uniform(0, delay * 0.1)  # 10% jitter
+            total_delay = delay + jitter
+            
+            logger.warning(f"Attempt {attempt + 1} failed: {e}. "
+                         f"Retrying in {total_delay:.1f}s...")
+            time.sleep(total_delay)
+        except PermanentError as e:
+            logger.error(f"Permanent failure: {e}. Not retrying.")
+            raise
+
+# Usage example
+def send_image_with_retry(association, dataset):
+    def send():
+        status = association.send_c_store(dataset)
+        
+        if status.Status == 0x0000:
+            return "SUCCESS"
+        elif status.Status == 0xA700:
+            # Out of resources - transient
+            raise TransientError("SCP out of resources")
+        elif status.Status == 0x0122:
+            # Not supported - permanent
+            raise PermanentError("SOP Class not supported")
+        else:
+            raise RuntimeError(f"Storage failed: 0x{status.Status:04X}")
+    
+    return retry_with_backoff(send, max_retries=3, base_delay=2.0)
+```
+
+### Exception Hierarchy
+
+**Recommended Exception Structure**:
+```python
+class DICOMError(Exception):
+    """Base class for DICOM errors"""
+    pass
+
+class DICOMNetworkError(DICOMError):
+    """Network-related errors"""
+    pass
+
+class DICOMAssociationError(DICOMNetworkError):
+    """Association establishment failed"""
+    def __init__(self, result, source, reason):
+        self.result = result
+        self.source = source
+        self.reason = reason
+        super().__init__(f"Association rejected: {result}/{source}/{reason}")
+
+class DICOMOperationError(DICOMError):
+    """DIMSE operation failed"""
+    def __init__(self, status, comment=None, offending=None):
+        self.status = status
+        self.comment = comment
+        self.offending_elements = offending
+        msg = f"Operation failed with status 0x{status:04X}"
+        if comment:
+            msg += f": {comment}"
+        super().__init__(msg)
+
+class DICOMStorageError(DICOMOperationError):
+    """C-STORE specific error"""
+    pass
+
+class DICOMQueryError(DICOMOperationError):
+    """C-FIND specific error"""
+    pass
+
+class DICOMRetrieveError(DICOMOperationError):
+    """C-GET/C-MOVE specific error"""
+    pass
+
+class DICOMParseError(DICOMError):
+    """File parsing error"""
+    pass
+
+class DICOMValidationError(DICOMError):
+    """Data validation error"""
+    pass
+```
+
+### Logging Best Practices
+
+```python
+import logging
+
+# Configure structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+logger = logging.getLogger('dicom.network')
+
+def log_dimse_operation(operation, peer, status, duration):
+    """Log DIMSE operation with context"""
+    log_data = {
+        'operation': operation,
+        'peer_ae': peer.ae_title,
+        'peer_addr': f"{peer.address}:{peer.port}",
+        'status': f"0x{status:04X}",
+        'duration_ms': int(duration * 1000)
+    }
+    
+    if status == 0x0000:
+        logger.info(f"{operation} succeeded", extra=log_data)
+    elif status == 0xFE00:
+        logger.warning(f"{operation} canceled", extra=log_data)
+    else:
+        logger.error(f"{operation} failed", extra=log_data)
+```
+
+### Error Recovery Checklist
+
+When operations fail:
+
+- [ ] Log full error context (status, comment, offending elements)
+- [ ] Determine if error is transient or permanent
+- [ ] For transient errors, retry with exponential backoff
+- [ ] For permanent errors, log and alert
+- [ ] Update metrics/monitoring
+- [ ] Check if association is still valid
+- [ ] Clean up resources
+- [ ] Notify user if appropriate
+- [ ] Consider fallback strategy
 
 ---
 
@@ -1971,6 +2991,588 @@ else:
 Where:
 - **Window Center (Level)** (0028,1050): Middle of intensity range
 - **Window Width** (0028,1051): Range of intensities
+
+---
+
+## Comprehensive Pixel Data Handling
+
+### Understanding Pixel Data Structure
+
+DICOM pixel data is stored in tag (7FE0,0010) and its structure depends on several key attributes that must be interpreted correctly.
+
+#### Critical Pixel Attributes
+
+| Tag | Name | Purpose |
+|-----|------|---------|
+| (0028,0002) | Samples per Pixel | 1 = grayscale, 3 = RGB/YBR |
+| (0028,0004) | Photometric Interpretation | Color space: MONOCHROME1/2, RGB, YBR_FULL, etc. |
+| (0028,0006) | Planar Configuration | 0 = interleaved (RGBRGB...), 1 = planar (RRR...GGG...BBB...) |
+| (0028,0008) | Number of Frames | Multi-frame images |
+| (0028,0010) | Rows | Image height |
+| (0028,0011) | Columns | Image width |
+| (0028,0100) | Bits Allocated | Storage size per sample (8, 16, 32) |
+| (0028,0101) | Bits Stored | Actual data bits (<= Bits Allocated) |
+| (0028,0102) | High Bit | Most significant bit position (Bits Stored - 1) |
+| (0028,0103) | Pixel Representation | 0 = unsigned, 1 = signed (2's complement) |
+| (0028,1050) | Window Center | Display window center |
+| (0028,1051) | Window Width | Display window width |
+| (0028,1052) | Rescale Intercept | Linear transformation: y = mx + b (b value) |
+| (0028,1053) | Rescale Slope | Linear transformation: y = mx + b (m value) |
+| (0028,1101) | Red Palette Color Lookup Table Descriptor | For pseudo-color |
+| (0028,1102) | Green Palette Color Lookup Table Descriptor | For pseudo-color |
+| (0028,1103) | Blue Palette Color Lookup Table Descriptor | For pseudo-color |
+
+### Pixel Data Extraction Algorithm
+
+#### Step 1: Calculate Expected Size
+
+```python
+def calculate_pixel_data_size(dataset):
+    """Calculate expected pixel data size in bytes"""
+    rows = dataset.Rows
+    columns = dataset.Columns
+    samples_per_pixel = dataset.SamplesPerPixel
+    bits_allocated = dataset.BitsAllocated
+    number_of_frames = getattr(dataset, 'NumberOfFrames', 1)
+    
+    bytes_per_sample = bits_allocated // 8
+    pixels_per_frame = rows * columns
+    bytes_per_frame = pixels_per_frame * samples_per_pixel * bytes_per_sample
+    total_bytes = bytes_per_frame * number_of_frames
+    
+    return total_bytes, bytes_per_frame
+```
+
+#### Step 2: Handle Transfer Syntax
+
+```python
+def get_pixel_data(dataset):
+    """Extract pixel data handling different transfer syntaxes"""
+    transfer_syntax = dataset.file_meta.TransferSyntaxUID
+    
+    # Uncompressed transfer syntaxes
+    if transfer_syntax in ['1.2.840.10008.1.2',      # Implicit VR LE
+                           '1.2.840.10008.1.2.1',    # Explicit VR LE
+                           '1.2.840.10008.1.2.2']:   # Explicit VR BE
+        return extract_uncompressed_pixels(dataset)
+    
+    # RLE Lossless
+    elif transfer_syntax == '1.2.840.10008.1.2.5':
+        return decode_rle_pixels(dataset)
+    
+    # JPEG Baseline (lossy)
+    elif transfer_syntax == '1.2.840.10008.1.2.4.50':
+        return decode_jpeg_baseline(dataset)
+    
+    # JPEG Lossless
+    elif transfer_syntax == '1.2.840.10008.1.2.4.70':
+        return decode_jpeg_lossless(dataset)
+    
+    # JPEG 2000 Lossless
+    elif transfer_syntax == '1.2.840.10008.1.2.4.90':
+        return decode_jpeg2000_lossless(dataset)
+    
+    # JPEG 2000 Lossy
+    elif transfer_syntax == '1.2.840.10008.1.2.4.91':
+        return decode_jpeg2000_lossy(dataset)
+    
+    else:
+        raise NotImplementedError(f"Transfer syntax not supported: {transfer_syntax}")
+```
+
+### Uncompressed Pixel Data Extraction
+
+```python
+import numpy as np
+
+def extract_uncompressed_pixels(dataset):
+    """Extract uncompressed pixel data into numpy array"""
+    # Get pixel data bytes
+    pixel_bytes = dataset.PixelData
+    
+    # Determine byte order
+    transfer_syntax = dataset.file_meta.TransferSyntaxUID
+    if transfer_syntax == '1.2.840.10008.1.2.2':  # Explicit VR Big Endian
+        byte_order = '>'
+    else:
+        byte_order = '<'  # Little Endian
+    
+    # Determine data type
+    bits_allocated = dataset.BitsAllocated
+    pixel_representation = dataset.PixelRepresentation
+    
+    if bits_allocated == 8:
+        dtype = np.uint8 if pixel_representation == 0 else np.int8
+    elif bits_allocated == 16:
+        dtype = np.dtype(f'{byte_order}u2') if pixel_representation == 0 else np.dtype(f'{byte_order}i2')
+    elif bits_allocated == 32:
+        dtype = np.dtype(f'{byte_order}u4') if pixel_representation == 0 else np.dtype(f'{byte_order}i4')
+    else:
+        raise ValueError(f"Unsupported bits allocated: {bits_allocated}")
+    
+    # Convert bytes to numpy array
+    pixel_array = np.frombuffer(pixel_bytes, dtype=dtype)
+    
+    # Reshape to image dimensions
+    rows = dataset.Rows
+    columns = dataset.Columns
+    samples_per_pixel = dataset.SamplesPerPixel
+    number_of_frames = getattr(dataset, 'NumberOfFrames', 1)
+    
+    if number_of_frames > 1:
+        if samples_per_pixel == 1:
+            shape = (number_of_frames, rows, columns)
+        else:
+            if dataset.PlanarConfiguration == 0:  # Interleaved
+                shape = (number_of_frames, rows, columns, samples_per_pixel)
+            else:  # Planar
+                shape = (number_of_frames, samples_per_pixel, rows, columns)
+                # Transpose to standard shape
+                pixel_array = pixel_array.reshape(shape).transpose(0, 2, 3, 1)
+                return pixel_array
+    else:
+        if samples_per_pixel == 1:
+            shape = (rows, columns)
+        else:
+            if dataset.PlanarConfiguration == 0:  # Interleaved
+                shape = (rows, columns, samples_per_pixel)
+            else:  # Planar
+                shape = (samples_per_pixel, rows, columns)
+                pixel_array = pixel_array.reshape(shape).transpose(1, 2, 0)
+                return pixel_array
+    
+    return pixel_array.reshape(shape)
+```
+
+### Multi-Frame Image Handling
+
+```python
+def extract_frame(dataset, frame_index):
+    """Extract a specific frame from multi-frame image"""
+    number_of_frames = getattr(dataset, 'NumberOfFrames', 1)
+    
+    if frame_index < 0 or frame_index >= number_of_frames:
+        raise IndexError(f"Frame index {frame_index} out of range [0, {number_of_frames})")
+    
+    # Get all frames
+    pixel_array = get_pixel_data(dataset)
+    
+    if number_of_frames == 1:
+        return pixel_array
+    else:
+        return pixel_array[frame_index]
+
+def iterate_frames(dataset):
+    """Generator to iterate through frames efficiently"""
+    pixel_array = get_pixel_data(dataset)
+    number_of_frames = getattr(dataset, 'NumberOfFrames', 1)
+    
+    if number_of_frames == 1:
+        yield pixel_array
+    else:
+        for i in range(number_of_frames):
+            yield pixel_array[i]
+```
+
+### RLE (Run-Length Encoding) Decompression
+
+```python
+def decode_rle_pixels(dataset):
+    """Decode RLE compressed pixel data"""
+    from pydicom.pixel_data_handlers import rle_handler
+    
+    # RLE encoding structure:
+    # Header: 16 x 4-byte segment offsets
+    # Segments: Compressed data for each sample/plane
+    
+    pixel_bytes = dataset.PixelData
+    
+    # Number of segments = Samples per Pixel x Number of Frames
+    samples_per_pixel = dataset.SamplesPerPixel
+    number_of_frames = getattr(dataset, 'NumberOfFrames', 1)
+    bytes_per_sample = dataset.BitsAllocated // 8
+    
+    # Parse RLE header (64 bytes)
+    import struct
+    header = struct.unpack('<16I', pixel_bytes[:64])
+    num_segments = header[0]
+    segment_offsets = header[1:num_segments + 1]
+    
+    # Decode each segment
+    decoded_segments = []
+    for i in range(num_segments):
+        offset = segment_offsets[i]
+        if i < num_segments - 1:
+            end = segment_offsets[i + 1]
+        else:
+            end = len(pixel_bytes)
+        
+        segment_data = pixel_bytes[offset:end]
+        decoded = decode_rle_segment(segment_data)
+        decoded_segments.append(decoded)
+    
+    # Combine segments based on bits allocated
+    if bytes_per_sample == 1:
+        pixel_data = decoded_segments[0]
+    elif bytes_per_sample == 2:
+        # Combine high and low byte segments
+        high_bytes = np.array(decoded_segments[0], dtype=np.uint8)
+        low_bytes = np.array(decoded_segments[1], dtype=np.uint8)
+        pixel_data = (high_bytes.astype(np.uint16) << 8) | low_bytes.astype(np.uint16)
+    else:
+        raise NotImplementedError("RLE only supports 8-bit and 16-bit data")
+    
+    # Reshape to image dimensions
+    rows = dataset.Rows
+    columns = dataset.Columns
+    return pixel_data.reshape(number_of_frames, rows, columns) if number_of_frames > 1 else pixel_data.reshape(rows, columns)
+
+def decode_rle_segment(segment_data):
+    """Decode a single RLE segment"""
+    decoded = bytearray()
+    i = 0
+    
+    while i < len(segment_data):
+        header_byte = segment_data[i]
+        i += 1
+        
+        if header_byte <= 127:
+            # Literal run: copy next (n+1) bytes
+            count = header_byte + 1
+            decoded.extend(segment_data[i:i + count])
+            i += count
+        elif header_byte >= 129:
+            # Replicate run: repeat next byte (257-n) times
+            count = 257 - header_byte
+            if i < len(segment_data):
+                value = segment_data[i]
+                decoded.extend([value] * count)
+                i += 1
+        # header_byte == 128 is no-op
+    
+    return decoded
+```
+
+### JPEG Decompression
+
+```python
+def decode_jpeg_baseline(dataset):
+    """Decode JPEG Baseline (lossy) compressed pixel data"""
+    from PIL import Image
+    import io
+    
+    pixel_bytes = dataset.PixelData
+    number_of_frames = getattr(dataset, 'NumberOfFrames', 1)
+    
+    if number_of_frames == 1:
+        # Single frame
+        img = Image.open(io.BytesIO(pixel_bytes))
+        return np.array(img)
+    else:
+        # Multi-frame: encapsulated format with offsets
+        frames = extract_encapsulated_frames(pixel_bytes)
+        decoded_frames = []
+        for frame_data in frames:
+            img = Image.open(io.BytesIO(frame_data))
+            decoded_frames.append(np.array(img))
+        return np.array(decoded_frames)
+
+def decode_jpeg_lossless(dataset):
+    """Decode JPEG Lossless compressed pixel data"""
+    # JPEG Lossless requires specialized decoder (not standard JPEG)
+    # Use pydicom's pixel_array or specialized library
+    from pydicom.pixel_data_handlers.jpeg_ls_handler import get_pixeldata
+    return get_pixeldata(dataset)
+
+def extract_encapsulated_frames(pixel_data):
+    """Extract individual frames from encapsulated pixel data"""
+    import struct
+    
+    # Encapsulated format:
+    # (FFFE,E000) Item with basic offset table
+    # (FFFE,E000) Items with frame data
+    # (FFFE,E0DD) Sequence delimiter
+    
+    frames = []
+    offset = 0
+    
+    while offset < len(pixel_data):
+        # Read item tag
+        if offset + 8 > len(pixel_data):
+            break
+        
+        tag = struct.unpack('<HH', pixel_data[offset:offset+4])
+        length = struct.unpack('<I', pixel_data[offset+4:offset+8])[0]
+        offset += 8
+        
+        if tag == (0xFFFE, 0xE000):  # Item
+            if length == 0:
+                # Basic offset table (skip)
+                continue
+            else:
+                # Frame data
+                frame_data = pixel_data[offset:offset+length]
+                frames.append(frame_data)
+                offset += length
+        elif tag == (0xFFFE, 0xE0DD):  # Sequence delimiter
+            break
+        else:
+            # Unknown tag, skip
+            offset += length
+    
+    return frames
+```
+
+### JPEG 2000 Decompression
+
+```python
+def decode_jpeg2000_lossless(dataset):
+    """Decode JPEG 2000 Lossless compressed pixel data"""
+    try:
+        import glymur
+    except ImportError:
+        raise ImportError("glymur library required for JPEG 2000: pip install glymur")
+    
+    pixel_bytes = dataset.PixelData
+    number_of_frames = getattr(dataset, 'NumberOfFrames', 1)
+    
+    if number_of_frames == 1:
+        # Single frame
+        jp2 = glymur.Jp2k(io.BytesIO(pixel_bytes))
+        return jp2[:]
+    else:
+        # Multi-frame
+        frames = extract_encapsulated_frames(pixel_bytes)
+        decoded_frames = []
+        for frame_data in frames:
+            jp2 = glymur.Jp2k(io.BytesIO(frame_data))
+            decoded_frames.append(jp2[:])
+        return np.array(decoded_frames)
+
+def decode_jpeg2000_lossy(dataset):
+    """Decode JPEG 2000 Lossy compressed pixel data"""
+    # Same process as lossless, different quality
+    return decode_jpeg2000_lossless(dataset)
+```
+
+### Color Space Conversion
+
+```python
+def convert_color_space(pixel_array, photometric_interpretation):
+    """Convert pixel data to RGB color space"""
+    if photometric_interpretation == 'RGB':
+        # Already RGB
+        return pixel_array
+    
+    elif photometric_interpretation == 'YBR_FULL':
+        # YCbCr to RGB conversion
+        return ybr_to_rgb(pixel_array)
+    
+    elif photometric_interpretation == 'YBR_FULL_422':
+        # YCbCr 4:2:2 subsampled
+        return ybr422_to_rgb(pixel_array)
+    
+    elif photometric_interpretation in ['MONOCHROME1', 'MONOCHROME2']:
+        # Grayscale - return as-is
+        return pixel_array
+    
+    elif photometric_interpretation == 'PALETTE COLOR':
+        # Apply color palette
+        return apply_palette(pixel_array)
+    
+    else:
+        raise ValueError(f"Unsupported photometric interpretation: {photometric_interpretation}")
+
+def ybr_to_rgb(pixel_array):
+    """Convert YBR_FULL (YCbCr) to RGB"""
+    # ITU-R BT.601 conversion
+    Y = pixel_array[:, :, 0].astype(np.float32)
+    Cb = pixel_array[:, :, 1].astype(np.float32) - 128
+    Cr = pixel_array[:, :, 2].astype(np.float32) - 128
+    
+    R = Y + 1.402 * Cr
+    G = Y - 0.344136 * Cb - 0.714136 * Cr
+    B = Y + 1.772 * Cb
+    
+    # Clip to valid range
+    rgb = np.stack([R, G, B], axis=2)
+    rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+    
+    return rgb
+
+def apply_palette(pixel_array, dataset):
+    """Apply color palette lookup table"""
+    # Get palette descriptors
+    red_desc = dataset.RedPaletteColorLookupTableDescriptor
+    green_desc = dataset.GreenPaletteColorLookupTableDescriptor
+    blue_desc = dataset.BluePaletteColorLookupTableDescriptor
+    
+    # Get palette data
+    red_lut = dataset.RedPaletteColorLookupTableData
+    green_lut = dataset.GreenPaletteColorLookupTableData
+    blue_lut = dataset.BluePaletteColorLookupTableData
+    
+    # Create RGB image by looking up each pixel value
+    rgb_image = np.zeros(pixel_array.shape + (3,), dtype=np.uint8)
+    rgb_image[:, :, 0] = red_lut[pixel_array]
+    rgb_image[:, :, 1] = green_lut[pixel_array]
+    rgb_image[:, :, 2] = blue_lut[pixel_array]
+    
+    return rgb_image
+```
+
+### Applying Rescale and Window/Level
+
+```python
+def apply_modality_lut(pixel_array, dataset):
+    """Apply rescale slope/intercept (Modality LUT)"""
+    intercept = getattr(dataset, 'RescaleIntercept', 0)
+    slope = getattr(dataset, 'RescaleSlope', 1)
+    
+    # Convert to float for calculation
+    if slope != 1 or intercept != 0:
+        pixel_array = pixel_array.astype(np.float64)
+        pixel_array = pixel_array * slope + intercept
+    
+    return pixel_array
+
+def apply_voi_lut(pixel_array, dataset, frame=0):
+    """Apply Window Center/Width (VOI LUT)"""
+    # Get window parameters
+    if hasattr(dataset, 'WindowCenter'):
+        window_center = dataset.WindowCenter
+        window_width = dataset.WindowWidth
+        
+        # Handle multi-valued attributes
+        if isinstance(window_center, (list, tuple)):
+            window_center = window_center[frame] if frame < len(window_center) else window_center[0]
+        if isinstance(window_width, (list, tuple)):
+            window_width = window_width[frame] if frame < len(window_width) else window_width[0]
+    else:
+        # Auto-calculate from pixel data range
+        window_center = (pixel_array.max() + pixel_array.min()) / 2
+        window_width = pixel_array.max() - pixel_array.min()
+    
+    # Apply windowing
+    lower = window_center - window_width / 2
+    upper = window_center + window_width / 2
+    
+    # Linear windowing
+    windowed = np.clip(pixel_array, lower, upper)
+    windowed = ((windowed - lower) / (upper - lower) * 255).astype(np.uint8)
+    
+    return windowed
+
+def apply_photometric_interpretation(pixel_array, dataset):
+    """Handle MONOCHROME1 vs MONOCHROME2"""
+    photometric = dataset.PhotometricInterpretation
+    
+    if photometric == 'MONOCHROME1':
+        # Inverted: lower values = brighter
+        if pixel_array.dtype == np.uint8:
+            return 255 - pixel_array
+        elif pixel_array.dtype == np.uint16:
+            return 65535 - pixel_array
+        else:
+            return pixel_array.max() - pixel_array
+    else:
+        # MONOCHROME2: higher values = brighter (normal)
+        return pixel_array
+```
+
+### Complete Pixel Processing Pipeline
+
+```python
+def get_display_ready_pixels(dataset, frame=0):
+    """Complete pipeline to get display-ready pixel data"""
+    # Step 1: Extract raw pixel data
+    pixel_array = get_pixel_data(dataset)
+    
+    # Step 2: Extract specific frame if multi-frame
+    if len(pixel_array.shape) > 2 and pixel_array.shape[0] > 1:
+        pixel_array = pixel_array[frame]
+    
+    # Step 3: Apply rescale (Modality LUT)
+    pixel_array = apply_modality_lut(pixel_array, dataset)
+    
+    # Step 4: Handle photometric interpretation
+    pixel_array = apply_photometric_interpretation(pixel_array, dataset)
+    
+    # Step 5: Apply window/level (VOI LUT)
+    if dataset.SamplesPerPixel == 1:
+        # Grayscale - apply windowing
+        pixel_array = apply_voi_lut(pixel_array, dataset, frame)
+    else:
+        # Color - convert color space if needed
+        pixel_array = convert_color_space(pixel_array, dataset.PhotometricInterpretation)
+    
+    return pixel_array
+```
+
+### Handling High Bit and Bits Stored
+
+```python
+def mask_pixel_data(pixel_array, dataset):
+    """Apply bit masking for Bits Stored < Bits Allocated"""
+    bits_stored = dataset.BitsStored
+    bits_allocated = dataset.BitsAllocated
+    high_bit = dataset.HighBit
+    
+    if bits_stored == bits_allocated:
+        return pixel_array
+    
+    # Create mask for valid bits
+    mask = (1 << bits_stored) - 1
+    
+    # Apply mask
+    masked = pixel_array & mask
+    
+    # Handle signed data
+    if dataset.PixelRepresentation == 1:
+        # Check if sign bit is set
+        sign_bit = 1 << (bits_stored - 1)
+        is_negative = (masked & sign_bit) != 0
+        
+        # Extend sign bit
+        if is_negative.any():
+            extension = ((1 << (bits_allocated - bits_stored)) - 1) << bits_stored
+            masked[is_negative] |= extension
+    
+    return masked
+```
+
+### Pixel Data Performance Optimization
+
+```python
+def lazy_load_pixels(dataset):
+    """Generator for memory-efficient frame iteration"""
+    number_of_frames = getattr(dataset, 'NumberOfFrames', 1)
+    
+    for frame_idx in range(number_of_frames):
+        # Load only this frame
+        frame = extract_frame(dataset, frame_idx)
+        yield get_display_ready_pixels(dataset, frame_idx)
+        
+        # Frame can be garbage collected after yield
+
+def create_thumbnail(dataset, max_size=(256, 256)):
+    """Create memory-efficient thumbnail"""
+    from PIL import Image
+    
+    # Get first frame only
+    pixel_array = get_display_ready_pixels(dataset, frame=0)
+    
+    # Convert to PIL Image
+    if len(pixel_array.shape) == 2:
+        img = Image.fromarray(pixel_array, mode='L')
+    else:
+        img = Image.fromarray(pixel_array, mode='RGB')
+    
+    # Create thumbnail
+    img.thumbnail(max_size, Image.LANCZOS)
+    
+    return np.array(img)
+```
 
 ---
 
