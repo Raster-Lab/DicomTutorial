@@ -1302,12 +1302,14 @@ public class CStoreSCU {
             device.setExecutor(executor);
             device.setScheduledExecutor(scheduler);
 
-            // Read DICOM file
+            // Read DICOM file to get metadata for association negotiation
             File dicomFile = new File(args[0]);
-            DicomInputStream dis = new DicomInputStream(dicomFile);
-            Attributes fmi = dis.readFileMetaInformation();
-            Attributes data = dis.readDataset();
-            dis.close();
+            Attributes fmi;
+            Attributes data;
+            try (DicomInputStream dis = new DicomInputStream(dicomFile)) {
+                fmi = dis.readFileMetaInformation();
+                data = dis.readDataset();
+            }
 
             String sopClassUID = fmi.getString(Tag.MediaStorageSOPClassUID);
             String sopInstanceUID = fmi.getString(Tag.MediaStorageSOPInstanceUID);
@@ -1323,19 +1325,19 @@ public class CStoreSCU {
             Connection remoteConn = new Connection(null, host, port);
             Association assoc = ae.connect(remoteConn, rq);
 
-            // Send C-STORE
+            // Send C-STORE using the dataset already read
             DimseRSPHandler rspHandler = new DimseRSPHandler(assoc.nextMessageID()) {
                 @Override
-                public void onDimseRSP(Association as, Attributes cmd, Attributes data) {
+                public void onDimseRSP(Association as, Attributes cmd, Attributes rspData) {
                     int status = cmd.getInt(Tag.Status, -1);
                     System.out.println("C-STORE Response Status: 0x"
                         + Integer.toHexString(status));
                 }
             };
 
+            DataWriterAdapter dataWriter = new DataWriterAdapter(data);
             assoc.cstore(sopClassUID, sopInstanceUID,
-                new InputStreamDataWriter(new DicomInputStream(dicomFile)),
-                transferSyntax, rspHandler);
+                dataWriter, transferSyntax, rspHandler);
 
             // Release association
             assoc.release();
